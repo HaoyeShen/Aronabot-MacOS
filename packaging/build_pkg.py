@@ -24,6 +24,9 @@ def build(*,online=False,sdk_only=False):
     license_dir=PAYLOAD/'licenses';license_dir.mkdir(exist_ok=True)
     for name in ['OPENCORE-AMR-LICENSE','OPENCORE-AMR-NOTICE','SILK-LICENSE']:
         shutil.copy2(ROOT/'bot/vendor'/name,license_dir/name)
+    for name in ['LICENSE','LICENSE.WecVoice-auto','UPSTREAM.md']:
+        shutil.copy2(ROOT/'bot'/name,license_dir/('BOT-'+name))
+    shutil.copy2(ROOT/'bot/CHANGELOG.md',sdk/'bot-CHANGELOG.md')
     bundle_payload=WORK/'online-payload' if online else PAYLOAD
     if sdk_only:
         bundle_payload=WORK/'sdk-payload'
