@@ -1,0 +1,789 @@
+"""Listening & reply behaviour: pacing, stale messages, quote and triggers."""
+
+from __future__ import annotations
+
+import tkinter as tk
+import threading
+import logging
+import math
+import re
+from datetime import datetime
+from tkinter import ttk
+
+from ...ui.theme import C, font, px
+from ...ui.widgets import (
+    BaseDialog,
+    Card,
+    LabeledEntry,
+    RoundedButton,
+    ScrollFrame,
+    SectionHeading,
+    ToggleRow,
+    confirm,
+)
+from .base import BasePage
+from ...web_search import normalize_query
+from ...config_store import video_topics
+
+log = logging.getLogger(__name__)
+
+
+class VoicePresetDialog(BaseDialog):
+    def __init__(self, parent, preset: dict, on_save) -> None:
+        character = preset.get('engine') == 'gpt_sovits'
+        super().__init__(parent, "编辑语音音色",
+                         "本机角色模型 · 语速与音量可调" if character else "调整音色与当前引擎支持的参数",
+                         width=520, height=520, icon=getattr(parent, "icon", None))
+        self.preset = dict(preset)
+        self.on_save = on_save
+        body = tk.Frame(self.body, bg=C["card"])
+        body.pack(fill="both", expand=True, padx=px(22), pady=px(16))
+        self.label = LabeledEntry(body, "音色名称", preset.get("label", ""), width=28)
+        self.label.pack(fill="x", pady=(0, px(7)))
+        self.voice = LabeledEntry(
+            body, "音色 ID", preset.get("voice", "zh-CN-XiaoyiNeural"),
+            hint="Edge: zh-CN-XiaoyiNeural / DeepSeek: stella、tide", width=32,
+        )
+        self.voice.pack(fill="x", pady=(0, px(7)))
+        row = tk.Frame(body, bg=C["card"])
+        row.pack(fill="x", pady=(0, px(7)))
+        self.rate = LabeledEntry(row, "语速", preset.get("rate", "+0%"), width=8)
+        self.rate.pack(side="left", fill="x", expand=True, padx=(0, px(4)))
+        self.pitch = LabeledEntry(row, "音调", preset.get("pitch", "+0Hz"), width=8)
+        self.pitch.pack(side="left", fill="x", expand=True, padx=px(4))
+        if preset.get('engine')=='deepseek':
+            self.rate.pack_forget()
+            self.pitch.pack_forget()
+        if character:
+            self.voice.pack_forget()
+            self.pitch.pack_forget()
+        self.volume = LabeledEntry(row, "音量", preset.get("volume", "+0%"), width=8)
+        self.volume.pack(side="left", fill="x", expand=True, padx=(px(4), 0))
+        self.description = LabeledEntry(
+            body, "说明（可选）", preset.get("description", ""), width=32,
+        )
+        self.description.pack(fill="x", pady=(0, px(6)))
+        self.error = tk.Label(body, text="", bg=C["card"], fg=C["red"], font=font(8),
+                              anchor="w")
+        self.error.pack(fill="x")
+        self.add_footer("取消", self.close, "secondary", 90)
+        self.add_footer("保存", self.save, "primary", 100)
+
+    def save(self) -> None:
+        label = self.label.get().strip()
+        voice = self.voice.get().strip()
+        if not label or not voice:
+            self.error.configure(text="音色名称和 Edge 音色 ID 不能为空。")
+            return
+        def signed(value: str, suffix: str) -> str:
+            value = (value or "").strip()
+            if not value:
+                return "+0" + suffix
+            if not value.startswith(("+", "-")):
+                value = "+" + value
+            return value if value.endswith(suffix) else value + suffix
+        preset = dict(self.preset)
+        preset.update({
+            "label": label,
+            "voice": voice,
+            "rate": signed(self.rate.get(), "%"),
+            "pitch": signed(self.pitch.get(), "Hz"),
+            "volume": signed(self.volume.get(), "%"),
+            "description": self.description.get().strip(),
+        })
+        try:
+            from ...voices import resolve_voice
+            resolve_voice(preset["voice"], rate=preset["rate"],
+                          pitch=preset["pitch"], volume=preset["volume"])
+            if preset.get('engine') == 'gpt_sovits' and not -50 <= float(preset['rate'].rstrip('%')) <= 50:
+                raise ValueError('角色模型语速请设置在 -50% 到 +50% 之间')
+        except Exception as exc:
+            self.error.configure(text=f"参数格式不正确：{exc}")
+            return
+        self.on_save(preset)
+        self.close()
+
+
+class ListenReplyPage(BasePage):
+    key = "listen_reply"
+    title = "监听与回复"
+    subtitle = "决定阿洛娜什么时候回复、如何引用，以及哪些话算是在叫她。"
+
+    def __init__(self, parent, app) -> None:
+        super().__init__(parent, app)
+        self._voice_test_busy = False
+        self._manual_video_busy = False
+        self._manual_topics_target = None
+        self._manual_topics_loaded = ()
+        self._web_test_busy = False
+        self._voice_preview_busy = False
+        self._build()
+
+    def _build(self) -> None:
+        scroll = ScrollFrame(self)
+        scroll.pack(fill="both", expand=True)
+        wrap = tk.Frame(scroll.inner, bg=C["bg"])
+        wrap.pack(fill="both", expand=True, padx=(0, px(4)), pady=(0, px(20)))
+
+        top = tk.Frame(wrap, bg=C["bg"])
+        top.pack(fill="x", pady=(0, px(12)))
+        tk.Label(top, text="LISTEN & REPLY", bg=C["bg"], fg=C["cyan_deep"],
+                 font=font(7, "bold")).pack(side="left", pady=(px(8), 0))
+        RoundedButton(top, text="保存设置", command=self.save, style="primary",
+                      width=112, height=34, bg=C["bg"], font_size=9).pack(side="right")
+        self.status = tk.Label(top, text="修改后请点击保存", bg=C["bg"], fg=C["muted"],
+                               font=font(8))
+        self.status.pack(side="right", padx=(0, px(9)), pady=(px(8), 0))
+
+        columns = tk.Frame(wrap, bg=C["bg"])
+        columns.pack(fill="both", expand=True)
+        columns.grid_columnconfigure(0, weight=1, uniform="reply")
+        columns.grid_columnconfigure(1, weight=1, uniform="reply")
+        left = tk.Frame(columns, bg=C["bg"])
+        left.grid(row=0, column=0, sticky="nsew", padx=(0, px(7)))
+        right = tk.Frame(columns, bg=C["bg"])
+        right.grid(row=0, column=1, sticky="nsew", padx=(px(7), 0))
+
+        reply = Card(left, padding=16, accent=C["cyan"])
+        reply.pack(fill="x")
+        SectionHeading(reply.body, "回复行为", "怎么回、什么时候回").pack(
+            fill="x", pady=(0, px(10))
+        )
+        self.auto_reply = ToggleRow(
+            reply.body, "自动回复",
+            "关闭后仍会记录消息与上下文，但不会发回微信。",
+            self.config.bot.get("auto_reply", True),
+        )
+        self.auto_reply.pack(fill="x", pady=px(5))
+        self.auto_start = ToggleRow(
+            reply.body, "启动 ARONA 时自动连接",
+            "打开程序后自动开始监听，无需再点「启动机器人」。",
+            self.config.bot.get("auto_start", True),
+        )
+        self.auto_start.pack(fill="x", pady=px(5))
+        self.auto_sticker = ToggleRow(
+            reply.body, "允许使用表情包",
+            "阿洛娜会结合语境从已启用的表情包里语义选择。",
+            self.config.bot.get("auto_sticker", True),
+        )
+        self.auto_sticker.pack(fill="x", pady=px(5))
+        self.native_sticker=ToggleRow(reply.body,'允许微信原生动画表情',
+            '由同一Agent检索所有表情包页、查看画面并按语境选一张；不是emoji或普通图片。需启用Agent与视觉模型。',
+            self.config.bot.get('native_sticker_enabled',True))
+        self.native_sticker.pack(fill='x',pady=px(5))
+        self.quiet = ToggleRow(
+            reply.body, "免打扰时段",
+            "该时段内只记录消息，不自动回复。",
+            self.config.bot.get("quiet_hours_enabled", False),
+        )
+        self.quiet.pack(fill="x", pady=px(5))
+
+        quiet_times = tk.Frame(reply.body, bg=C["card"])
+        quiet_times.pack(fill="x", pady=(px(4), px(8)))
+        self.quiet_start = LabeledEntry(
+            quiet_times, "开始", self.config.bot.get("quiet_start", "23:30"),
+            hint="HH:MM", width=8,
+        )
+        self.quiet_start.pack(side="left", fill="x", expand=True, padx=(0, px(5)))
+        self.quiet_end = LabeledEntry(
+            quiet_times, "结束", self.config.bot.get("quiet_end", "07:30"),
+            hint="HH:MM", width=8,
+        )
+        self.quiet_end.pack(side="left", fill="x", expand=True, padx=(px(5), 0))
+
+        group_frame = tk.Frame(reply.body, bg=C["card"])
+        group_frame.pack(fill="x", pady=(px(4), 0))
+        self.probability_first = ToggleRow(
+            group_frame, "概率回复 + @必回复 + 关键词必回复",
+            "普通消息只按概率抽签；@机器人或命中关键词直接回复，不再进行模型是否回复的二次筛选。",
+            True)
+        tk.Label(group_frame, text="普通消息按概率回复；@机器人、关键词必回复。", bg=C["card"], fg=C["text_soft"], font=font(8), wraplength=px(420)).pack(fill="x")
+        self.group_at_always = ToggleRow(
+            group_frame, "群聊 @ 后必回复",
+            "被 @ 时直接回复，不受普通消息概率影响；自动回复与免打扰总开关仍生效。",
+            self.config.bot.get("group_at_always_reply", True),
+        )
+
+        self.group_at_self_name = ToggleRow(
+            group_frame, "群聊 @ 我的微信昵称也触发",
+            "关闭后只认 @阿洛娜 / @ARONA，不把登录账号昵称算作 @。",
+            self.config.bot.get("group_at_include_self_name", True),
+        )
+
+        self.group_probability = ToggleRow(
+            group_frame, "启用群聊概率回复",
+            "普通群消息命中概率就生成回复；关闭后仅 @机器人和关键词必回复。",
+            self.config.bot.get("group_probability_reply", True),
+        )
+        self.group_probability.pack(fill="x")
+        probability_row = tk.Frame(group_frame, bg=C["card"])
+        probability_row.pack(fill="x", pady=(px(4), 0))
+        self.group_probability_value = LabeledEntry(
+            probability_row, "群聊回复概率（%）",
+            str(round(float(self.config.bot.get("group_reply_probability", 0.03)) * 100)),
+            hint="0–100，默认 3；每群可在测试对象中单独调整", width=8,
+        )
+        self.group_probability_value.pack(fill="x")
+        self.followup_timeout = LabeledEntry(
+            group_frame, "唤醒后续聊超时（分钟）",
+            str(self.config.bot.get("followup_timeout_minutes", 5)),
+            hint="默认 5，范围 1–1440", width=8,
+        )
+
+
+
+        idle = Card(left, padding=16, accent=C["pink"])
+        idle.pack(fill="x", pady=(px(12), 0))
+        SectionHeading(idle.body, "群聊主动分享", "由模型判断何时加入").pack(
+            fill="x", pady=(0, px(8)))
+        self.idle_chat_enabled = ToggleRow(
+            idle.body, "主动活跃气氛", "仅限已启用的群聊；模型判断时机，遵守免打扰、自动回复和管理员暂停。",
+            self.config.bot.get("idle_chat_enabled", True))
+        self.idle_chat_enabled.pack(fill="x", pady=px(4))
+        self.idle_chat_minutes = LabeledEntry(
+            idle.body, "演示模式冷场时长（分钟）", str(self.config.bot.get("idle_chat_minutes", 30)),
+            hint="仅离线演示模型使用", width=8)
+        self.idle_chat_minutes.pack(fill="x", pady=(px(4), px(6)))
+        self.idle_chat_probability = LabeledEntry(
+            idle.body, "演示模式主动发言概率（%）",
+            str(round(float(self.config.bot.get("idle_chat_probability", 0.03)) * 100, 2)),
+            hint="仅离线演示模型使用", width=8)
+        self.idle_chat_probability.pack(fill="x")
+        tk.Label(idle.body,
+                 text="接入模型结合近期对话决定是否分享文字、视频或网页；群内有人聊天时也可分享。\n离线演示模式使用上面的固定间隔和概率。",
+                 bg=C["card"], fg=C["muted"], font=font(7), anchor="w", justify="left",
+                 wraplength=px(420)).pack(fill="x", pady=(px(6), 0))
+        self.idle_video_enabled = ToggleRow(
+            idle.body, "允许分享哔哩哔哩视频", "模型判断是否分享主题视频并撰写短评。",
+            self.config.bot.get("idle_video_enabled", True))
+        self.idle_video_enabled.pack(fill="x", pady=(px(10), px(4)))
+        self.share_images_direct = ToggleRow(idle.body, '直接发送网页图片',
+            '通过模型审核的网页图片发送为微信图片，失败回退链接。', self.config.bot.get('share_images_direct', True))
+        self.share_images_direct.pack(fill='x', pady=px(4))
+        self.share_web_screenshots = ToggleRow(idle.body, '允许网页正文截图',
+            '仅渲染公开网页正文，不截桌面或微信；失败回退链接。', self.config.bot.get('share_web_screenshots', True))
+        self.share_web_screenshots.pack(fill='x', pady=px(4))
+        self.idle_video_topics = LabeledEntry(
+            idle.body, "全局默认分享主题", "，".join(self.config.bot.get("idle_video_topics", ["蔚蓝档案"])),
+            hint="每群可在「测试对象 → 编辑」单独设置；最多 10 个", width=25)
+        self.idle_video_topics.pack(fill="x", pady=(px(4), px(6)))
+        self.idle_video_probability = LabeledEntry(
+            idle.body, "演示模式视频分享概率（%）",
+            str(round(float(self.config.bot.get("idle_video_probability", 1.0)) * 100, 2)),
+            hint="仅离线演示模型使用", width=8)
+        self.idle_video_probability.pack(fill="x")
+        tk.Label(idle.body, text="手动推送目标群聊（完整群名）", bg=C["card"],
+                 fg=C["text_soft"], font=font(8, "bold"), anchor="w").pack(
+                     fill="x", pady=(px(12), px(4)))
+        self.idle_video_manual_chat = ttk.Combobox(
+            idle.body, style="Arona.TCombobox", font=font(8))
+        self.idle_video_manual_chat.pack(fill="x")
+        self.idle_video_manual_chat.set(self.config.bot.get("idle_video_manual_chat", "test"))
+        self.manual_video_topics = LabeledEntry(
+            idle.body, "所选群视频主题（本群）", "",
+            hint="留空沿用全局主题", width=25)
+        self.manual_video_topics.pack(fill="x", pady=(px(7), px(3)))
+        self.idle_video_manual_chat.bind('<<ComboboxSelected>>', lambda _: self._load_manual_video_topics(force=True))
+        self.idle_video_manual_chat.bind('<FocusOut>', lambda _: self._load_manual_video_topics())
+        self.manual_video_btn = RoundedButton(
+            idle.body, text="立即推送一条暖场视频", command=self.send_manual_idle_video,
+            style="secondary", width=196, height=32, bg=C["card"], font_size=8)
+        self.manual_video_btn.pack(anchor="w", pady=(px(7), px(4)))
+        self.manual_video_status = tk.Label(
+            idle.body, text="选群后可编辑本群主题，推送或保存时生效；各群互不影响。\n"
+                            "未配置群使用全局主题，可先在「测试对象」添加该群。手动推送不等待冷场或概率。",
+            bg=C["card"], fg=C["muted"], font=font(7), anchor="w",
+            justify="left", wraplength=px(420))
+        self.manual_video_status.pack(fill="x")
+        tk.Label(idle.body, text="仅分享近 7 天可访问的视频，同群不重复。短评每条不超 15 字，\n含视频链接最多 3 个气泡；没有合适视频时发简单文字，不假装看过。",
+                 bg=C["card"], fg=C["muted"], font=font(7), anchor="w", justify="left",
+                 wraplength=px(420)).pack(fill="x", pady=(px(6), 0))
+
+        timing = Card(right, padding=16, accent=C["pink"])
+        timing.pack(fill="x")
+        SectionHeading(timing.body, "时效、引用与标点", "别回太旧的消息").pack(
+            fill="x", pady=(0, px(10))
+        )
+        self.stale_minutes = LabeledEntry(
+            timing.body, "超过多久不回复（分钟）",
+            str(self.config.bot.get("stale_reply_minutes", 10)),
+            hint="默认 10；旧消息只存上下文", width=10,
+        )
+        self.stale_minutes.pack(fill="x", pady=(0, px(7)))
+        self.quote_reply = ToggleRow(
+            timing.body, "使用微信引用回复",
+            "引用阿洛娜正在回复的那条消息；找不到时自动改为普通发送。",
+            self.config.bot.get("quote_reply", False),
+        )
+        self.quote_reply.pack(fill="x", pady=px(5))
+        self.replace_punctuation = ToggleRow(
+            timing.body, "把句号、逗号、分号变成空格",
+            "开启后阿洛娜的文字更松散，不再出现这些标点。",
+            self.config.bot.get("replace_punctuation", False),
+        )
+        self.replace_punctuation.pack(fill="x", pady=px(5))
+        tk.Label(
+            timing.body,
+            text="超过时效的旧消息不会触发回复，也不会作为新鲜上下文使用；已有摘要仍会保留。",
+            bg=C["card"], fg=C["muted"], font=font(7), anchor="w",
+            justify="left", wraplength=px(420),
+        ).pack(fill="x", pady=(px(5), 0))
+
+        voice = Card(right, padding=16, accent=C["cyan"])
+        voice.pack(fill="x", pady=(px(12), 0))
+        SectionHeading(voice.body, "语音气泡", "偶尔用声音回复").pack(
+            fill="x", pady=(0, px(8))
+        )
+        self.voice_enabled = ToggleRow(
+            voice.body, "允许自动发送微信语音气泡",
+            "普通回复按概率选语音；明确要求声音时优先响应，失败回退文字。",
+            self.config.bot.get("voice_enabled", False),
+        )
+        self.voice_enabled.pack(fill="x", pady=px(4))
+        self.natural_voice = ToggleRow(
+            voice.body, "保留自然语音停顿", "语音保留句读，不受文字标点替换影响；关闭可恢复旧读法。",
+            self.config.bot.get("natural_voice", True),
+        )
+        self.natural_voice.pack(fill="x", pady=px(4))
+        self.voice_probability = LabeledEntry(
+            voice.body, "语音概率（%）",
+            str(round(float(self.config.bot.get("voice_probability", 0.5)) * 100)),
+            hint="默认 50", width=8,
+        )
+        self.voice_probability.pack(fill="x", pady=(px(4), px(3)))
+        self.voice_max_chars = LabeledEntry(
+            voice.body, "语音最多字数",
+            str(self.config.bot.get("voice_max_chars", 30)),
+            hint="默认 30", width=8,
+        )
+        self.voice_max_chars.pack(fill="x", pady=(px(3), px(3)))
+        preset_row = tk.Frame(voice.body, bg=C["card"])
+        preset_row.pack(fill="x", pady=(px(4), px(4)))
+        tk.Label(preset_row, text="音色", bg=C["card"], fg=C["text_soft"],
+                 font=font(8, "bold")).pack(side="left", padx=(0, px(5)))
+        self.voice_preset = ttk.Combobox(
+            preset_row, state="readonly", style="Arona.TCombobox", font=font(8),
+        )
+        self.voice_preset.pack(side="left", fill="x", expand=True)
+        self._refresh_voice_presets()
+        buttons = tk.Frame(voice.body, bg=C["card"])
+        buttons.pack(fill="x", pady=(px(2), px(4)))
+        RoundedButton(buttons, text="新增", command=self.add_voice,
+                      style="ghost", width=52, height=28, bg=C["card"], font_size=7).pack(side="left")
+        RoundedButton(buttons, text="编辑", command=self.edit_voice,
+                      style="ghost", width=52, height=28, bg=C["card"], font_size=7).pack(side="left", padx=px(4))
+        RoundedButton(buttons, text="删除", command=self.delete_voice,
+                      style="ghost", width=52, height=28, bg=C["card"], font_size=7).pack(side="left")
+        RoundedButton(buttons, text="试听「你好」", command=self.preview_voice,
+                      style="secondary", width=100, height=28, bg=C["card"], font_size=7).pack(side="right")
+        tk.Label(
+            voice.body,
+            text="语音经内部函数直接发送，无需虚拟声卡；试听只在本机播放。",
+            bg=C["card"], fg=C["muted"], font=font(7), anchor="w",
+            justify="left", wraplength=px(420),
+        ).pack(fill="x")
+
+        tk.Label(voice.body, text="测试语音目标群聊（完整群名）", bg=C["card"],
+                 fg=C["text_soft"], font=font(8, "bold"), anchor="w").pack(
+                     fill="x", pady=(px(12), px(4)))
+        self.voice_test_chat = ttk.Combobox(
+            voice.body, style="Arona.TCombobox", font=font(8),
+        )
+        self.voice_test_chat.pack(fill="x")
+        self.voice_test_chat.set(self.config.bot.get("voice_test_chat", "test"))
+        self._refresh_voice_test_chats()
+        self.voice_test_btn = RoundedButton(
+            voice.body, text="发送测试语音气泡", command=self.send_test_voice,
+            style="secondary", width=178, height=32, bg=C["card"], font_size=8,
+        )
+        self.voice_test_btn.pack(anchor="w", pady=(px(7), px(4)))
+        self.voice_test_status = tk.Label(
+            voice.body, text="请先连接微信；使用当前音色发送「你好，语音测试。」，失败回退文字。",
+            bg=C["card"], fg=C["muted"], font=font(7), anchor="w",
+            justify="left", wraplength=px(420),
+        )
+        self.voice_test_status.pack(fill="x")
+
+        network = Card(right, padding=16)
+        network.pack(fill="x", pady=(px(12), 0))
+        SectionHeading(network.body, "联网搜索与知识积累", "陌生知识可以查，读到的资料留在本机").pack(
+            fill="x", pady=(0, px(8)))
+        self.web_search_enabled = ToggleRow(
+            network.body, "需要时联网搜索并积累知识",
+            "读取公开网页，正文与来源加入本地训练；关闭后仍保留已学资料。",
+            self.config.bot.get("web_search_enabled", True))
+        self.web_search_enabled.pack(fill="x", pady=px(4))
+        self.baidu_baike_enabled = ToggleRow(
+            network.body, '同时搜索百度百科',
+            '保留原网页搜索来源，增加百科词条；百科无法访问时继续使用其他网页。',
+            self.config.bot.get('baidu_baike_enabled',True))
+        self.baidu_baike_enabled.pack(fill='x',pady=px(4))
+        self.agent_enabled = ToggleRow(
+            network.body, "Agent 自主使用工具",
+            "AI 功能统一由 Agent 调度并记录；此开关控制普通回复是否自主追加工具轮次，关闭后单步回答。",
+            self.config.bot.get("agent_enabled", True))
+        self.agent_enabled.pack(fill="x", pady=px(4))
+        self.agent_max_steps = LabeledEntry(
+            network.body, "最多工具轮次", str(self.config.bot.get("agent_max_steps", 4)),
+            hint="1–8，普通聊天不必调用工具", width=8)
+        self.agent_max_steps.pack(fill="x", pady=px(4))
+        self.agent_timeout = LabeledEntry(
+            network.body, "任务时间预算（秒）", str(self.config.bot.get("agent_timeout_seconds", 90)),
+            hint="10–300，超出后停止追加工具", width=8)
+        self.agent_timeout.pack(fill="x", pady=px(4))
+        self.web_test_query = LabeledEntry(
+            network.body, "测试检索词（公开主题）", self.config.bot.get("web_search_test_query", "Python 装饰器"),
+            hint="不需要连接微信", width=26)
+        self.web_test_query.pack(fill="x", pady=(px(7), px(5)))
+        self.web_test_btn = RoundedButton(
+            network.body, text="一键测试联网搜索", command=self.test_web_search,
+            style="secondary", width=180, height=32, bg=C["card"], font_size=8)
+        self.web_test_btn.pack(anchor="w", pady=(px(4), px(5)))
+        self.web_test_status = tk.Label(
+            network.body, text="测试会读取网页并验证入库，不发送微信消息；测试不受自动搜索开关影响。",
+            bg=C["card"], fg=C["muted"], font=font(7), anchor="w", justify="left", wraplength=px(420))
+        self.web_test_status.pack(fill="x")
+
+        trigger = Card(right, padding=16)
+        trigger.pack(fill="x", pady=(px(12), 0))
+        SectionHeading(trigger.body, "关键词触发", "没 @ 也可能是在叫她").pack(
+            fill="x", pady=(0, px(8))
+        )
+        self.trigger_enabled = ToggleRow(
+            trigger.body, "启用名称/关键词触发",
+            "文字消息命中任一配置关键词就回复，不抽概率，不作语义唤醒筛选。",
+            self.config.bot.get("trigger_enabled", True),
+        )
+        self.trigger_enabled.pack(fill="x", pady=px(4))
+        self.trigger_semantic = ToggleRow(
+            self.trigger_enabled.master, "结合上下文判断是否在叫阿洛娜",
+            "区分直接呼叫与第三人称讨论；判断失败回退本地规则。",
+            self.config.bot.get("trigger_semantic_check", True),
+        )
+
+        self.read_links = ToggleRow(
+            self.trigger_enabled.master, "读取分享链接与视频号卡片",
+            "通过网络读取公开网页；视频号仅参考标题和封面，不在微信中打开。",
+            self.config.bot.get("read_links", True),
+        )
+        self.read_links.pack(fill="x", pady=px(4))
+        tk.Label(
+            trigger.body, text="关键词（每行一个，也可以逗号分隔）",
+            bg=C["card"], fg=C["text_soft"], font=font(8, "bold"), anchor="w",
+        ).pack(fill="x", pady=(px(4), px(3)))
+        self.trigger_keywords = tk.Text(
+            trigger.body, height=4, bg=C["card_soft"], fg=C["text"],
+            insertbackground=C["text"], relief="flat", font=font(8),
+            highlightthickness=1, highlightbackground=C["line"],
+            highlightcolor=C["cyan"], padx=px(6), pady=px(4),
+        )
+        self.trigger_keywords.pack(fill="x")
+        self.trigger_keywords.insert(
+            "1.0", "\n".join(str(x) for x in
+                             self.config.bot.get("trigger_keywords", ["阿洛娜", "Arona", "ARONA"]))
+        )
+        tk.Label(
+            trigger.body, text="例如“阿洛娜你好啊”会触发；清空则只认 @。",
+            bg=C["card"], fg=C["muted"], font=font(7), anchor="w",
+        ).pack(fill="x", pady=(px(4), 0))
+
+    def on_show(self) -> None:
+        self._refresh_voice_test_chats()
+
+    def test_web_search(self) -> None:
+        if self._web_test_busy:
+            return
+        query = normalize_query(self.web_test_query.get())
+        if not query:
+            self.app.toast("请填写公开主题的检索词，不要包含私人联系方式或密钥。", "warn")
+            return
+        self.config.bot['web_search_test_query'] = query
+        try:
+            self.config.save()
+        except OSError:
+            self.app.toast("无法保存测试检索词，请检查配置文件权限。", "error")
+            return
+        self._web_test_busy = True
+        self.web_test_btn.set_busy(True, "正在搜索并读取…")
+        self.web_test_status.configure(text="正在搜索、模型筛选、读取正文并检查知识库入库…", fg=C['cyan_deep'])
+        def worker() -> None:
+            try:
+                result = self.service.test_web_search(query)
+            except Exception as exc:
+                log.warning('联网搜索测试任务失败：%s', type(exc).__name__)
+                result = {'ok': False, 'message': '联网搜索测试未完成，请查看日志。'}
+            self.service.emit('web_search_test_done', result)
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _refresh_voice_test_chats(self) -> None:
+        names = ["test"] + [str(t["name"]) for t in self.config.data.get("targets", [])
+                            if t.get("type") == "group"]
+        self.voice_test_chat.configure(values=list(dict.fromkeys(names)))
+        self.idle_video_manual_chat.configure(values=list(dict.fromkeys(names)))
+        self._load_manual_video_topics()
+
+    def _load_manual_video_topics(self, force: bool = False) -> None:
+        chat = self.idle_video_manual_chat.get().strip()
+        if (not force and chat == self._manual_topics_target
+                and tuple(video_topics(self.manual_video_topics.get())) != self._manual_topics_loaded):
+            return  # Preserve this group's unsaved edits when changing pages.
+        target = self.config.target_by_name(chat)
+        topics = video_topics((target or {}).get('idle_video_topics'))
+        self.manual_video_topics.set('，'.join(topics))
+        self.manual_video_topics.entry.configure(state='normal' if target and target.get('type') == 'group' else 'disabled')
+        self._manual_topics_target, self._manual_topics_loaded = chat, tuple(topics)
+
+    def _save_manual_video_topics(self) -> None:
+        self._load_manual_video_topics()
+        target = self.config.target_by_name(self.idle_video_manual_chat.get().strip())
+        if target and target.get('type') == 'group':
+            topics = video_topics(self.manual_video_topics.get())
+            target['idle_video_topics'] = topics
+            self._manual_topics_loaded = tuple(topics)
+
+    def send_manual_idle_video(self) -> None:
+        if self._manual_video_busy:
+            return
+        chat = self.idle_video_manual_chat.get().strip()
+        if not chat:
+            self.app.toast("请填写推送目标群聊的完整名称。", "warn")
+            return
+        self.config.bot["idle_video_manual_chat"] = chat
+        # A manual push applies the visible theme entries, so a new keyword is
+        # not silently ignored until the page's separate Save button is used.
+        self.config.bot['idle_video_topics'] = video_topics(self.idle_video_topics.get()) or ['蔚蓝档案']
+        self._save_manual_video_topics()
+        try:
+            self.config.save()
+        except OSError as exc:
+            log.warning("保存手动视频推送目标失败：%s", exc)
+            self.app.toast("无法保存推送群聊，请检查配置文件权限。", "error")
+            return
+        self._manual_video_busy = True
+        self.manual_video_btn.set_busy(True, "正在检索并推送…")
+        self.manual_video_status.configure(text=f"正在检索视频，准备向「{chat}」推送…", fg=C["cyan_deep"])
+        def worker() -> None:
+            try:
+                result = self.service.send_manual_idle_video(chat)
+            except Exception as exc:
+                log.warning("手动暖场视频任务失败：%s", exc)
+                result = {"ok": False, "message": "暖场视频推送失败，请查看运行日志。"}
+            self.service.emit("idle_video_manual_done", result)
+        threading.Thread(target=worker, daemon=True).start()
+
+    def send_test_voice(self) -> None:
+        if self._voice_test_busy:
+            return
+        chat = self.voice_test_chat.get().strip()
+        if not chat:
+            self.app.toast("请填写测试群聊的完整名称。", "warn")
+            return
+        preset = self._selected_voice_preset()
+        self.config.bot["voice_test_chat"] = chat
+        try:
+            self.config.save()
+        except OSError as exc:
+            log.warning("保存测试语音目标失败：%s", exc)
+            self.app.toast("无法保存测试群聊，请检查配置文件权限。", "error")
+            return
+        self._voice_test_busy = True
+        self.voice_test_btn.set_busy(True, "正在发送…")
+        self.voice_test_status.configure(text=f"正在向「{chat}」发送测试语音，请勿切换微信会话。",
+                                         fg=C["cyan_deep"])
+
+        def worker() -> None:
+            try:
+                result = self.service.send_test_voice(chat, preset_id=preset["id"])
+            except Exception as exc:
+                log.warning("测试语音任务失败：%s", exc)
+                result = {"ok": False, "message": "测试语音发送失败，请查看运行日志。"}
+            # The existing main-thread event pump also works while this page is hidden.
+            self.service.emit("voice_test_done", result)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def on_event(self, kind: str, data: dict) -> None:
+        if kind == 'web_search_test_done':
+            self._web_test_busy = False
+            self.web_test_btn.set_busy(False, '一键测试联网搜索')
+            message = data.get('message') or '联网搜索测试未完成。'
+            self.web_test_status.configure(text=message, fg=C['green'] if data.get('ok') else C['red'])
+            self.app.toast(message.split('\n')[0], 'success' if data.get('ok') else 'warn')
+            return
+        if kind == "idle_video_manual_done":
+            self._manual_video_busy = False
+            self.manual_video_btn.set_busy(False, "立即推送一条暖场视频")
+            message = data.get("message") or "暖场视频未发送。"
+            self.manual_video_status.configure(text=message, fg=C["green"] if data.get("ok") else C["red"])
+            self.app.toast(message, "success" if data.get("ok") else "warn")
+            return
+        if kind != "voice_test_done":
+            return
+        self._voice_test_busy = False
+        self.voice_test_btn.set_busy(False, "发送测试语音气泡")
+        message = data.get("message") or "测试语音发送失败。"
+        self.voice_test_status.configure(text=message,
+                                         fg=C["green"] if data.get("ok") else C["red"])
+        self.app.toast(message, "success" if data.get("ok") else "warn")
+
+    def _selected_voice_preset(self) -> dict:
+        labels = list(self._voice_label_map)
+        label = self.voice_preset.get() if hasattr(self, "voice_preset") else ""
+        preset_id = self._voice_label_map.get(label, "arona")
+        return self.service.voice_presets.get(preset_id)
+
+    def _refresh_voice_presets(self, select_id: str = "") -> None:
+        presets = self.service.voice_presets.list()
+        self._voice_label_map = {item["label"]: item["id"] for item in presets}
+        self._voice_id_map = {item["id"]: item["label"] for item in presets}
+        self.voice_preset["values"] = list(self._voice_label_map)
+        target = select_id or str(self.config.bot.get("voice_name", "arona"))
+        self.voice_preset.set(self._voice_id_map.get(target, presets[0]["label"]))
+
+    def add_voice(self) -> None:
+        def saved(preset: dict) -> None:
+            result = self.service.voice_presets.upsert(preset)
+            self._refresh_voice_presets(result["id"])
+            self.app.toast("音色已新增。", "success")
+        VoicePresetDialog(self.winfo_toplevel(), {
+            "label": "自定义音色", "voice": "zh-CN-XiaoyiNeural",
+            "rate": "+0%", "pitch": "+0Hz", "volume": "+0%",
+        }, saved).show()
+
+    def edit_voice(self) -> None:
+        preset = self._selected_voice_preset()
+        def saved(value: dict) -> None:
+            result = self.service.voice_presets.upsert(value)
+            self._refresh_voice_presets(result["id"])
+            self.app.toast("音色已保存。", "success")
+        VoicePresetDialog(self.winfo_toplevel(), preset, saved).show()
+
+    def delete_voice(self) -> None:
+        preset = self._selected_voice_preset()
+        if preset.get("builtin"):
+            self.app.toast("阿洛娜和普拉娜是内置音色，不能删除。", "warn")
+            return
+        if not confirm(self.winfo_toplevel(), "删除音色",
+                       f"删除自定义音色「{preset.get('label')}」？",
+                       ok_text="删除", danger=True, icon=self.icon):
+            return
+        if self.service.voice_presets.delete(preset["id"]):
+            self._refresh_voice_presets("arona")
+            self.app.toast("音色已删除。", "success")
+
+    def preview_voice(self) -> None:
+        if self._voice_preview_busy:
+            self.app.toast("试听正在合成，请稍候。", "info")
+            return
+        self._voice_preview_busy = True
+        preset = self._selected_voice_preset()
+        self.app.toast("正在加载角色音色并合成试听，首次加载较慢…"
+                       if preset.get('engine') == 'gpt_sovits' else "正在合成试听语音…", "info")
+        def worker() -> None:
+            try:
+                from ...native_voice import preview
+                preview(preset, '你好')
+                self.after(0, lambda: self.app.toast('试听播放完成。', 'success'))
+            except Exception as exc:
+                message = str(exc)
+                self.after(0, lambda message=message: self.app.toast(
+                    "试听失败：" + message, "error"))
+            finally:
+                self._voice_preview_busy = False
+        threading.Thread(target=worker, daemon=True).start()
+
+    def save(self) -> None:
+        try:
+            stale = max(1, min(1440, int(self.stale_minutes.get() or 10)))
+            followup_timeout = max(1, min(1440, int(self.followup_timeout.get() or 5)))
+            agent_max_steps = max(1, min(8, int(self.agent_max_steps.get() or 4)))
+            agent_timeout = max(10, min(300, int(self.agent_timeout.get() or 90)))
+            idle_minutes = max(1, min(1440, int(self.idle_chat_minutes.get() or 30)))
+            idle_probability = float(self.idle_chat_probability.get() or 3)
+            if not math.isfinite(idle_probability):
+                raise ValueError
+            idle_probability = max(0.0, min(100.0, idle_probability))
+            video_probability = float(self.idle_video_probability.get() or 100)
+            if not math.isfinite(video_probability):
+                raise ValueError
+            video_probability = max(0.0, min(100.0, video_probability))
+            probability = float(self.group_probability_value.get() or 3)
+            if not math.isfinite(probability):
+                raise ValueError
+            probability = max(0.0, min(100.0, probability))
+            voice_probability = max(0, min(100, int(float(
+                self.voice_probability.get() or 50
+            ))))
+            voice_max_chars = max(8, min(60, int(
+                self.voice_max_chars.get() or 30
+            )))
+            for value in (self.quiet_start.get(), self.quiet_end.get()):
+                if value:
+                    datetime.strptime(value, "%H:%M")
+        except ValueError:
+            self.app.toast("请检查概率、分钟数和免打扰时间格式。", "error")
+            return
+        web_query = normalize_query(self.web_test_query.get() or 'Python 装饰器')
+        if not web_query:
+            self.app.toast('联网测试词请使用公开主题，不要包含私人联系方式或密钥。', 'warn')
+            return
+        keywords = [line.strip() for line in
+                    self.trigger_keywords.get("1.0", "end").replace("，", ",")
+                    .replace("\n", ",").split(",") if line.strip()]
+        old_probability = float(self.config.bot.get('group_reply_probability', 0.03))
+        for target in self.config.targets():
+            if (target.get('type') == 'group'
+                    and float(target.get('group_reply_probability', old_probability)) == old_probability):
+                target['group_reply_probability'] = probability / 100.0
+        self.config.bot.update({
+            "auto_reply": self.auto_reply.get(),
+            "auto_start": self.auto_start.get(),
+            "auto_sticker": self.auto_sticker.get(),
+            "native_sticker_enabled":self.native_sticker.get(),
+            "quiet_hours_enabled": self.quiet.get(),
+            "quiet_start": self.quiet_start.get(),
+            "quiet_end": self.quiet_end.get(),
+            "probability_first_reply": True,
+            "group_at_always_reply": True,
+            "group_at_include_self_name": True,
+            "group_probability_reply": self.group_probability.get(),
+            "group_reply_probability": probability / 100.0,
+            "followup_timeout_minutes": followup_timeout,
+            "idle_chat_enabled": self.idle_chat_enabled.get(),
+            "idle_chat_minutes": idle_minutes,
+            "idle_chat_probability": idle_probability / 100.0,
+            "idle_video_enabled": self.idle_video_enabled.get(),
+            "share_images_direct": self.share_images_direct.get(),
+            "share_web_screenshots": self.share_web_screenshots.get(),
+            "idle_video_manual_chat": self.idle_video_manual_chat.get().strip() or "test",
+            "idle_video_topics": re.split(r"[,，\n]", self.idle_video_topics.get()),
+            "idle_video_probability": video_probability / 100.0,
+            "voice_enabled": self.voice_enabled.get(),
+            "voice_test_chat": self.voice_test_chat.get().strip() or "test",
+            "natural_voice": self.natural_voice.get(),
+            "read_links": self.read_links.get(),
+            "web_search_enabled": self.web_search_enabled.get(),
+            "baidu_baike_enabled": self.baidu_baike_enabled.get(),
+            "agent_enabled": self.agent_enabled.get(),
+            "agent_max_steps": agent_max_steps,
+            "agent_timeout_seconds": agent_timeout,
+            "web_search_test_query": web_query,
+            "trigger_semantic_check": False,
+            "voice_name": self._voice_label_map.get(
+                self.voice_preset.get(), "arona"
+            ),
+            "voice_probability": voice_probability / 100.0,
+            "voice_max_chars": voice_max_chars,
+            "stale_reply_minutes": stale,
+            "quote_reply": self.quote_reply.get(),
+            "replace_punctuation": self.replace_punctuation.get(),
+            "trigger_enabled": self.trigger_enabled.get(),
+            "trigger_keywords": keywords or ["阿洛娜"],
+        })
+        self._save_manual_video_topics()
+        self.config.save()
+        self.service.reload_config()
+        self.status.configure(text="已保存 · " + datetime.now().strftime("%H:%M:%S"),
+                              fg=C["green"])
+        self.app.toast("监听与回复设置已保存。", "success")
+        self.app.refresh_header()

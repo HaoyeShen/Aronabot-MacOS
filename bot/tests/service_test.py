@@ -1,0 +1,1104 @@
+"""End-to-end service test with a fake WeChat transport and the demo model."""
+
+from __future__ import annotations
+
+import sys
+import tempfile
+import time
+import threading
+from types import SimpleNamespace
+from dataclasses import replace
+from unittest.mock import patch
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT))
+
+import app.service as service_module
+from app.config_store import ConfigStore, PersonaStore, StickerStore
+from app.memory import MemoryStore
+from app.model_client import LLMResult
+from app.service import BotService
+from app.training import TrainingStore
+from app.wechat_adapter import BaseWeChatAdapter, IncomingMessage, SendResult
+
+
+class FakeAdapter(BaseWeChatAdapter):
+    instances: list["FakeAdapter"] = []
+
+    def __init__(self, config, on_message, on_status=None) -> None:
+        super().__init__(config, on_message, on_status)
+        self.sent: list[tuple[str, str]] = []
+        self.files: list[str] = []
+        self.backend_label = "fake · UI Automation"
+        self.self_name = "阿洛娜"
+        self.connected = True
+        FakeAdapter.instances.append(self)
+
+    def start(self, targets):
+        self._targets = {t["name"]: t for t in targets}
+        self.connected = True
+
+    def send_text(self, chat, text):
+        self.sent.append((chat, text))
+        return SendResult(True, "fake send")
+
+    def send_sticker(self, chat, path):
+        self.files.append(str(path))
+        return SendResult(True, "fake sticker")
+
+    def fetch_recent(self, chat, limit):
+        return []
+
+    def probe(self):
+        return True, "fake online"
+
+    def stop(self):
+        self.connected = False
+
+
+def wait_event(service: BotService, kind: str, timeout: float = 8.0) -> dict:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            event_kind, data = service.events.get(timeout=0.2)
+        except Exception:
+            continue
+        if event_kind == kind:
+            return data
+    raise AssertionError(f"event {kind} not seen")
+
+
+def test_idle_chat() -> None:
+    """Deterministic idle scheduling, privacy gates, activity races and retries."""
+    from app.idle_chat import conversation_starter
+    from datetime import datetime
+    from app.config_store import DEFAULT_CONFIG
+    assert DEFAULT_CONFIG['bot']['idle_chat_probability'] == .03
+    with tempfile.TemporaryDirectory() as tmp:
+        base = Path(tmp)
+        config = ConfigStore(base / 'config.json')
+        config.bot["probability_first_reply"] = False  # Legacy wake-up regression coverage.
+        config.set_active_profile('demo-local')
+        for value, expected in [('bad', .03), (None, .03), (float('nan'), .03),
+                                (float('inf'), .03), (-1, 0), (2, 1), (0, 0), (.075, .075)]:
+            config.bot['idle_chat_probability'] = value
+            config.save()
+            assert ConfigStore(config.path).bot['idle_chat_probability'] == expected
+        for value, expected in [('bad', 30), (None, 30), (0, 1), (2000, 1440)]:
+            config.bot['idle_chat_minutes'] = value
+            config.save()
+            assert ConfigStore(config.path).bot['idle_chat_minutes'] == expected
+        config.bot.update(idle_chat_enabled=True, idle_chat_probability=.03, idle_chat_minutes=30,
+                          global_cooldown=0, per_chat_cooldown=0, auto_reply=True, idle_video_enabled=False)
+        group = config.add_target('test', 'group', 'arona')
+        config.add_target('friend', 'friend', 'arona')
+        config.add_target('disabled', 'group', 'arona')
+        group = config.target_by_name('test')
+        disabled = config.target_by_name('disabled')
+        disabled['enabled'] = False
+        memory = MemoryStore(base / 'memory.db')
+        training = TrainingStore(base / 'training.db', base / 'files')
+        service = BotService(config, PersonaStore(base/'personas.json'), StickerStore(base/'stickers.json'),
+                             memory, training, admin_state_path=base/'admin.json')
+        adapter = FakeAdapter(config, service._on_incoming)
+        service._adapter, service._running = adapter, True
+        clock = [1000.0]
+        epoch = time.time()
+        def wall(): return epoch + clock[0] - 1000
+        def incoming(text='大家好', **kwargs):
+            return IncomingMessage('test', '群友', text, chat_type='group', received_at=wall(), **kwargs)
+        try:
+            with patch.object(service_module.time, 'monotonic', side_effect=lambda: clock[0]), \
+                    patch.object(service_module.time, 'time', side_effect=wall):
+                service._idle_tick()
+                assert set(service._idle_chats) == {'test'} and not adapter.sent
+                clock[0] += 1799
+                with patch.object(service_module.random, 'random') as draw:
+                    service._idle_tick()
+                    draw.assert_not_called()
+                clock[0] += 1
+                with patch.object(service_module.random, 'random', return_value=.031) as draw:
+                    service._idle_tick()
+                    assert draw.call_count == 1 and not adapter.sent
+                    clock[0] += 1
+                    service._idle_tick()
+                    assert draw.call_count == 1, 'no draw on every supervisor tick'
+                clock[0] += 299
+                with patch.object(service_module.random, 'random') as draw:
+                    service._idle_tick()
+                    draw.assert_not_called()
+                    clock[0] += 1499
+                    service._idle_tick()
+                    draw.assert_not_called()
+                clock[0] += 1
+                with patch.object(service_module.random, 'random', return_value=.031) as draw:
+                    service._idle_tick()
+                    assert draw.call_count == 1 and not adapter.sent  # 60 minutes
+                    clock[0] += 1800
+                    service._idle_tick()
+                    assert draw.call_count == 2 and not adapter.sent  # 90 minutes
+                    clock[0] += 1799
+                    service._idle_tick()
+                    assert draw.call_count == 2
+                    clock[0] += 1
+                    draw.return_value = .029
+                    service._idle_tick()
+                    assert draw.call_count == 3  # 120 minutes, first successful draw
+                assert len(adapter.sent) == 1 and len(adapter.sent[0][1]) <= 23
+                assert memory.recent('test')[-1]['meta']['proactive']
+                assert not adapter.files and not service._followups
+                clock[0] += 3600
+                with patch.object(service_module.random, 'random') as draw:
+                    service._idle_tick()
+                    draw.assert_not_called()
+                assert len(adapter.sent) == 1, 'one message per uninterrupted silence'
+                # Echo/old/system events do not reopen the idle episode.
+                service._note_idle_incoming(incoming(adapter.sent[-1][1], direction='out', origin='bot_echo'))
+                service._note_idle_incoming(incoming('系统', direction='system'))
+                old = incoming('旧消息'); old.received_at -= 10000
+                service._note_idle_incoming(old)
+                assert service._idle_chats['test']['sent']
+                # An ordinary non-trigger message at ingress resets the timer.
+                clock[0] += 1
+                message = incoming(external_id='new-human')
+                service._on_incoming(message)
+                assert not service._idle_chats['test']['sent']
+                clock[0] += 1800
+                with patch.object(service_module.random, 'random') as draw:
+                    service._idle_tick()
+                    draw.assert_not_called()  # still queued / waiting for its reply
+                assert service._incoming.get_nowait() is message
+                # Disabled/quiet/admin/paused/disconnected/busy all block.
+                for field in ('idle_chat_enabled', 'auto_reply'):
+                    config.bot[field] = False
+                    service._idle_tick()
+                    config.bot[field] = True
+                with patch.object(service, '_in_quiet_hours', return_value=True): service._idle_tick()
+                service._admin_sessions[('test', 'admin')] = {}
+                service._idle_tick(); service._admin_sessions.clear()
+                service._muted_until['test'] = wall()+600
+                service._idle_tick(); service._muted_until.clear()
+                with patch.object(adapter, 'connected', False): service._idle_tick()
+                service._reply_busy = True
+                service._idle_tick(); service._reply_busy = False
+                config.bot['idle_chat_probability'] = 0
+                service._idle_tick(); config.bot['idle_chat_probability'] = 1
+                assert len(adapter.sent) == 1
+                # New activity during preparation cancels the pending send.
+                def activity_race(*args):
+                    clock[0] += 1
+                    service._note_idle_incoming(incoming('新消息'))
+                    return '各位老师，早上好。'
+                with patch.object(service_module, 'conversation_starter', side_effect=activity_race):
+                    service._idle_tick()
+                assert len(adapter.sent) == 1
+                clock[0] += 1800
+                # A failed send does not consume the episode; retry is delayed.
+                with patch.object(adapter, 'send_text', return_value=SendResult(False, 'offline')) as send:
+                    service._idle_tick(); service._idle_tick()
+                    assert send.call_count == 1 and not service._idle_chats['test']['sent']
+                clock[0] += 1800
+                service._idle_tick()
+                assert len(adapter.sent) == 2 and service._idle_chats['test']['sent']
+                assert adapter.sent[-1][0] == 'test'
+                # Removed targets lose eligibility. Re-enabling starts a full wait.
+                group['enabled'] = False
+                service._idle_tick()
+                assert not service._idle_chats
+                group['enabled'] = True
+                service._idle_tick()
+                assert not service._idle_chats['test']['sent'] and len(adapter.sent) == 2
+                group2 = config.add_target('alias', 'group', 'arona')
+                with patch.object(adapter, 'canonical_chat', side_effect=lambda name: 'test' if name=='alias' else name):
+                    service._idle_tick()
+                    assert set(service._idle_chats) == {'test'}, 'aliases must share one timer'
+                group2['enabled'] = False
+                service._idle_tick()
+                clock[0] += 1800
+                memory.add_user('test', '我很难过，家人生病了', sender='群友')
+                service._idle_tick()
+                assert len(adapter.sent) == 2, 'do not cheer over serious context'
+                # A custom period is also the retry period. New activity during
+                # a missed cycle cancels its deadline and starts a full wait.
+                config.bot.update(idle_chat_minutes=2, idle_chat_probability=.03)
+                clock[0] += 1
+                service._note_idle_incoming(incoming('普通群消息', external_id='custom-period-start'))
+                with patch.object(service_module.random, 'random', return_value=.99) as draw:
+                    clock[0] += 119
+                    service._idle_tick()
+                    draw.assert_not_called()
+                    clock[0] += 1
+                    service._idle_tick()
+                    assert draw.call_count == 1
+                    clock[0] += 60
+                    service._note_idle_incoming(incoming('又一条消息', external_id='custom-period-reset'))
+                    clock[0] += 119
+                    service._idle_tick()
+                    assert draw.call_count == 1, 'new message must reset the missed deadline'
+                    clock[0] += 1
+                    service._idle_tick()
+                    assert draw.call_count == 2
+                    clock[0] += 120
+                    service._idle_tick()
+                    assert draw.call_count == 3 and len(adapter.sent) == 2
+                service.stop()
+                assert not service._idle_chats
+        finally:
+            service.stop()
+            memory.close(); training.close()
+    for hour in (2, 8, 12, 16, 20):
+        with patch('app.idle_chat.datetime') as date:
+            date.now.return_value = datetime(2026, 11, 2, hour)
+            for persona in ({'id':'arona','name':'阿洛娜'}, {'id':'plana','name':'普拉娜'}):
+                for _ in range(8):
+                    text = conversation_starter(persona)
+                    assert text and len(text) <= 23
+                    assert not any(word in text for word in ('最近', '想聊聊', '来冒个泡', '开心的事', '?', '？'))
+                    if hour == 2:
+                        assert '早上好' not in text
+    assert not conversation_starter({'name':'阿洛娜'}, max_chars=1), 'never truncate a sentence'
+
+
+def test_idle_videos() -> None:
+    import urllib.error
+    from email.message import Message
+    import app.bilibili_video as videos
+    from app.news import NewsService
+    stamp = int(time.time()) - 30
+    assert videos._related('人工智能与计算机', {'title': '计算机毕业设计与课程'})
+    assert videos._related('AI和人工智能', {'title': 'AI agent 技术介绍'})
+    assert videos._related('AI', {'title': 'OpenAI 研究笔记'})
+    assert videos._related('蔚蓝档案', {'title': 'BlueArchive'})
+    assert not videos._related('AI', {'title': 'daily holiday music'})
+    assert not videos._related('人工智能与计算机', {'title': '猫咪散步日常'})
+    row = {'bvid': 'BV1hb4c64EBb', 'pubdate': stamp, 'title': '蔚蓝档案游戏攻略', 'tag': '蔚蓝档案'}
+    detail = {'bvid': row['bvid'], 'aid': 123456, 'title': row['title'], 'pubdate': stamp, 'state': 0}
+    video = videos.Video(row['bvid'], detail['aid'], detail['title'], '蔚蓝档案', stamp,
+                         'https://b23.tv/Abc1234')
+    def api(path, params, **kwargs):
+        if path.endswith('/type'):
+            assert params['keyword'] == '蔚蓝档案' and params['search_type'] == 'video'
+            return {'result': [row]}
+        assert path.endswith('/view') and params['bvid'] == row['bvid']
+        return detail
+    with tempfile.TemporaryDirectory() as tmp:
+        base = Path(tmp)
+        store = videos.BilibiliVideoStore(base/'videos.json')
+        with patch.object(videos, '_api_json', side_effect=api), \
+                patch.object(videos, '_verified_video_link', return_value=video.url):
+            assert store.pick(['蔚蓝档案'], 'test') == video
+            assert not store.state_path.exists(), 'selection must not mark a failed/cancelled send'
+            store.mark_sent('test', video)
+            assert not store.pick(['蔚蓝档案'], 'test')
+            assert store.pick(['蔚蓝档案'], 'another') == video
+            assert not videos.BilibiliVideoStore(store.state_path).pick(['蔚蓝档案'], 'test')
+        for bad_row in ({**row, 'title': '无关日常', 'tag': '蔚蓝档案'}, {**row, 'pubdate': 0},
+                        {**row, 'pubdate': stamp-8*86400}, {**row, 'pubdate': stamp+3600},
+                        {**row, 'is_pay': 1}, {**row, 'bvid': 'https://evil.example/'}):
+            isolated = videos.BilibiliVideoStore(base/'none.json')
+            with patch.object(videos, '_api_json', return_value={'result': [bad_row]}) as request:
+                assert not isolated.pick(['蔚蓝档案'], 'test') and request.call_count == 1
+        with patch.object(videos, '_api_json', side_effect=OSError('offline')):
+            failed = videos.BilibiliVideoStore(base/'none.json')
+            assert not failed.pick(['蔚蓝档案'], 'test')
+            assert '接口暂时不可用' in failed.miss_message()
+        # A failed/empty first topic must not suppress the other configured topic.
+        keywords = []
+        def alternate(path, params, **kwargs):
+            if path.endswith('/type'):
+                keywords.append(params['keyword'])
+                return {'result': [] if params['keyword'] == '空主题' else [{**row, 'title': 'Python 入门', 'tag': 'Python'}]}
+            return {**detail, 'title': 'Python 入门'}
+        with patch.object(videos, '_api_json', side_effect=alternate), \
+                patch.object(videos, '_verified_video_link', return_value=video.url), \
+                patch.object(videos.random, 'sample', side_effect=lambda values, size: list(values)):
+            assert videos.BilibiliVideoStore(base/'alternate.json').pick(['空主题', 'Python'], 'group-b').topic == 'Python'
+            assert keywords == ['空主题', 'Python']
+        with patch.object(videos, '_api_json', side_effect=[{'result':[row]}, {**detail, 'state':-4}]):
+            assert not videos.BilibiliVideoStore(base/'none.json').pick(['蔚蓝档案'], 'test')
+        # Official short links must redirect to exactly the verified BV or AV.
+        for destination, expected in (
+            ('https://www.bilibili.com/video/'+video.bvid+'?share=1', video.url),
+            ('https://www.bilibili.com/video/av123456', video.url),
+            ('https://www.bilibili.com/video/BV1gb4c64EL6', ''),
+            ('https://evil.example/video/'+video.bvid, ''),
+            ('https://www.bilibili.com@evil.example/video/'+video.bvid, ''),
+        ):
+            headers = Message(); headers['Location'] = destination
+            error = urllib.error.HTTPError(video.url, 302, 'redirect', headers, None)
+            with patch.object(videos, '_api_json', return_value={'content':'标题 '+video.url}), \
+                    patch.object(videos.urllib.request, 'build_opener') as opener:
+                opener.return_value.open.side_effect = error
+                assert videos._verified_short_link(video) == expected
+        with patch.object(videos, '_api_json', return_value={'content':video.url+'longer'}):
+            assert not videos._verified_short_link(video), 'never truncate a long URL'
+
+        # Both automatic and manual sharing must preserve a full official URL
+        # in one bubble even though it exceeds the ordinary text limit.
+        from dataclasses import replace
+        video = replace(video, url=f'https://www.bilibili.com/zh-Hans/video/{video.bvid}/')
+        config = ConfigStore(base/'config.json')
+        config.bot["probability_first_reply"] = False  # Legacy wake-up regression coverage.
+        assert config.bot['idle_video_topics'] == ['蔚蓝档案']
+        config.bot['idle_video_topics'] = '蔚蓝档案，Python\nPython'
+        config.save()
+        assert config.bot['idle_video_topics'] == ['蔚蓝档案', 'Python']
+        config.bot['idle_video_topics'] = []
+        config.bot['idle_video_probability'] = float('nan')
+        config.save()
+        assert config.bot['idle_video_topics'] == ['蔚蓝档案'] and config.bot['idle_video_probability'] == 1
+        config.set_active_profile('demo-local')
+        config.add_target('test', 'group', 'arona')
+        config.bot.update(idle_chat_enabled=True, idle_chat_probability=1, idle_chat_minutes=1,
+                          idle_video_enabled=True, idle_video_probability=1, replace_punctuation=True,
+                          auto_reply=True, reply_delay_min=0, reply_delay_max=0,
+                          global_cooldown=0, per_chat_cooldown=0, auto_sticker=False)
+        memory = MemoryStore(base/'memory.db')
+        training = TrainingStore(base/'training.db', base/'files')
+        service = BotService(config, PersonaStore(base/'personas.json'), StickerStore(base/'stickers.json'),
+                             memory, training, admin_state_path=base/'admin.json')
+        service.idle_videos = videos.BilibiliVideoStore(base/'sent.json')
+        adapter = FakeAdapter(config, service._on_incoming)
+        service._adapter, service._running = adapter, True
+        service._sync_idle_groups(adapter)
+        def eligible():
+            state = service._idle_chats['test']
+            state.update(last=time.monotonic()-61, next_check=0, sent=False)
+            return state
+        try:
+            # Natural comments are complete 15-char sentences, at most two
+            # comment bubbles so the URL plus comments never exceeds three.
+            with patch.object(config, 'active_profile', return_value={'provider':'openai','model':'fixture','timeout':30}), \
+                    patch.object(service_module, 'make_client') as factory:
+                for raw, count in [('这个主题挺有意思。', 1),
+                                   ('这个标题有点反差。新角色真可爱。', 2),
+                                   ('有点意思。标题挺特别。还真有点好奇呢。', 0),
+                                   ('这是一条非常非常长且不能随意切断的评论。', 0),
+                                   ('我刚看完，剪辑非常棒。', 0), ('这个主题真的很', 0)]:
+                    factory.return_value.chat.return_value = LLMResult(raw, 'fixture', 'openai', 1)
+                    comments = service._idle_video_comments(video, service.personas.get('arona'), 'test')
+                    assert len(comments) == count and all(0 < len(s) <= 15 for s in comments)
+                    if raw.startswith(('我刚看完', '这是一条', '这个主题真的很', '有点意思。标题')):
+                        assert comments == [], 'unusable comments must not be clipped or fabricated'
+                factory.return_value.chat.side_effect = OSError('offline')
+                assert service._idle_video_comments(video, service.personas.get('arona'), 'test') == []
+            with patch.object(service.idle_videos, 'pick', return_value=video) as pick, \
+                    patch.object(service.idle_videos, 'mark_sent') as mark:
+                # Ordinary replies and news must never request videos.
+                service._handle_incoming(IncomingMessage('test', '群友', '@阿洛娜 早上好', chat_type='group'))
+                service.news = NewsService(config, service.personas, state_path=base/'news.json')
+                config.target_by_name('test').update(news_enabled=True, news_time='00:00')
+                with patch.object(service.news, 'fetch', return_value={'国服':[], '日服':[], '国际服':[]}):
+                    service._news_tick()
+                pick.assert_not_called(); mark.assert_not_called()
+                # Repeated scheduler ticks must not repeat an unchanged skip
+                # log; checking, schedule changes and tomorrow still work.
+                from datetime import datetime
+                class NewsClock(datetime):
+                    current = datetime(2026, 11, 5, 16, 42)
+                    @classmethod
+                    def now(cls):
+                        return cls.current
+                scheduled = [{'name': '新闻A', 'news_time': '06:50'},
+                             {'name': '新闻B', 'news_time': '06:50'}]
+                with patch.object(service.news, 'enabled_targets', return_value=scheduled), \
+                        patch.object(service.news, 'run', return_value={'sent':False, 'reason':'已过早间补发窗口'}) as run, \
+                        patch.object(service_module, 'datetime', NewsClock), \
+                        patch.object(service_module.log, 'info') as status:
+                    service._news_tick(); service._news_tick()
+                    assert run.call_count == 4 and status.call_count == 2
+                    scheduled[0]['news_time'] = '07:00'
+                    service._news_tick()
+                    assert status.call_count == 3
+                    NewsClock.current = datetime(2026, 11, 6, 16, 42)
+                    service._news_tick()
+                    assert status.call_count == 5
+                    run.return_value = {'sent':False, 'reason':'还没到发送时间'}
+                    service._news_tick()
+                    assert status.call_count == 5
+                    run.return_value = {'sent':False, 'reason':'已过早间补发窗口'}
+                    service._news_tick()
+                    assert status.call_count == 7
+                    scheduled.clear()
+                    service._news_tick()
+                    assert not service._news_skip_states
+                adapter.sent.clear()
+                eligible()
+                with patch.object(adapter, 'send_text', return_value=SendResult(False, 'offline')):
+                    service._idle_tick()
+                mark.assert_not_called()
+                # New activity while searching cancels sending and dedup writes.
+                state = eligible()
+                def race(*args):
+                    with service._idle_lock:
+                        state['revision'] += 1
+                    return video
+                with patch.object(service.idle_videos, 'pick', side_effect=race): service._idle_tick()
+                mark.assert_not_called()
+                assert not adapter.sent
+                eligible()
+                service._idle_tick()
+                assert adapter.sent[0] == ('test', video.url), 'punctuation conversion must not corrupt links'
+                assert len(adapter.sent) == 2 and len(adapter.sent[1][1]) <= 15
+                mark.assert_called_once_with('test', video)
+                assert memory.recent('test')[-1]['meta']['video']['bvid'] == video.bvid
+                remembered = memory.recent('test')[-1]['content']
+                assert video.title in remembered and video.url in remembered and adapter.sent[1][1] in remembered
+                service._idle_tick()
+                assert len(adapter.sent) == 2
+                # Missing results gracefully become a short greeting, not a fabricated link.
+                eligible()
+                with patch.object(service.idle_videos, 'pick', return_value=None): service._idle_tick()
+                assert len(adapter.sent) == 3 and not adapter.sent[-1][1].startswith('http')
+                # A URL already delivered is recorded even if its comment fails;
+                # do not retry the whole bundle or store an unsent comment.
+                mark.reset_mock()
+                eligible()
+                with patch.object(adapter, 'send_text', side_effect=[SendResult(True), SendResult(False, 'offline')]) as send:
+                    service._idle_tick()
+                    service._idle_tick()
+                    assert send.call_count == 2
+                mark.assert_called_once_with('test', video)
+                assert memory.recent('test')[-1]['meta']['bubbles'] == [video.url]
+                mark.reset_mock()
+                eligible()
+                def changed_settings(*args):
+                    config.bot['idle_video_topics'] = ['其他主题']
+                    return ['有点意思。']
+                with patch.object(service, '_idle_video_comments', side_effect=changed_settings), \
+                        patch.object(adapter, 'send_text') as send:
+                    service._idle_tick()
+                    send.assert_not_called()
+                    mark.assert_not_called()
+            # Each canonical group supplies its own topics to the actual search
+            # path; only groups left blank inherit the global list.
+            from dataclasses import replace
+            config.add_target('另一个测试群', 'group', 'arona')
+            config.update_target(config.target_by_name('test')['id'], {'idle_video_topics':['Python']})
+            config.update_target(config.target_by_name('另一个测试群')['id'], {'idle_video_topics':['明日方舟']})
+            def all_eligible():
+                service._sync_idle_groups(adapter)
+                for state in service._idle_chats.values():
+                    state.update(last=time.monotonic()-61, next_check=0, sent=False)
+            def themed_video(topics, chat):
+                return replace(video, topic=topics[0])
+            with patch.object(service.idle_videos, 'pick', side_effect=themed_video) as search, \
+                    patch.object(service, '_idle_video_comments', return_value=['有点意思。']):
+                all_eligible()
+                service._idle_tick()
+                assert [c.args for c in search.call_args_list] == [(['Python'], 'test'), (['明日方舟'], '另一个测试群')]
+                config.update_target(config.target_by_name('另一个测试群')['id'], {'idle_video_topics':[]})
+                config.bot['idle_video_topics'] = ['音乐']
+                search.reset_mock()
+                all_eligible()
+                service._idle_tick()
+                assert [c.args for c in search.call_args_list] == [(['Python'], 'test'), (['音乐'], '另一个测试群')]
+                config.update_target(config.target_by_name('另一个测试群')['id'], {'enabled':False})
+                all_eligible()
+                def group_topic_race(*args):
+                    config.update_target(config.target_by_name('test')['id'], {'idle_video_topics':['新主题']})
+                    return ['有点意思。']
+                with patch.object(service, '_idle_video_comments', side_effect=group_topic_race), \
+                        patch.object(adapter, 'send_text') as send, \
+                        patch.object(service.idle_videos, 'mark_sent') as mark:
+                    service._idle_tick()
+                    send.assert_not_called()
+                    mark.assert_not_called()
+        finally:
+            service.stop(); memory.close(); training.close()
+
+
+def test_manual_idle_video() -> None:
+    from app.bilibili_video import BilibiliVideoStore, Video
+    with tempfile.TemporaryDirectory() as tmp:
+        base = Path(tmp)
+        config = ConfigStore(base/'config.json')
+        config.bot["probability_first_reply"] = False  # Legacy wake-up regression coverage.
+        assert config.bot['idle_video_manual_chat'] == 'test'
+        config.bot['idle_video_manual_chat'] = '  '
+        config.save()
+        assert ConfigStore(config.path).bot['idle_video_manual_chat'] == 'test'
+        config.set_active_profile('demo-local')
+        config.add_target('test', 'group', 'plana')
+        config.add_target('friend', 'friend', 'arona')
+        config.target_by_name('test')['idle_video_topics'] = ['Python']
+        config.bot.update(auto_reply=False, idle_chat_enabled=False, idle_video_enabled=False,
+                          idle_chat_probability=0, idle_video_probability=0, replace_punctuation=True)
+        memory = MemoryStore(base/'memory.db')
+        training = TrainingStore(base/'training.db', base/'files')
+        service = BotService(config, PersonaStore(base/'personas.json'), StickerStore(base/'stickers.json'),
+                             memory, training, admin_state_path=base/'admin.json')
+        service.idle_videos = BilibiliVideoStore(base/'videos.json')
+        adapter = FakeAdapter(config, service._on_incoming)
+        service._adapter, service._running = adapter, True
+        service._sync_idle_groups(adapter)
+        video = Video('BV1hb4c64EBb', 123456, 'Python 示例', 'Python', int(time.time())-60,
+                      'https://www.bilibili.com/zh-Hans/video/BV1hb4c64EBb/')
+        try:
+            with patch.object(service.idle_videos, 'pick', return_value=video) as pick, \
+                    patch.object(service.idle_videos, 'mark_sent', wraps=service.idle_videos.mark_sent) as mark:
+                assert not service.send_manual_idle_video('')['ok']
+                assert not service.send_manual_idle_video('friend')['ok']
+                with patch.object(adapter, 'connected', False):
+                    assert not service.send_manual_idle_video('test')['ok']
+                pick.assert_not_called()
+                service._idle_tick_lock.acquire()
+                try:
+                    assert not service.send_manual_idle_video('test')['ok']
+                    assert service._idle_tick_lock.locked()
+                    pick.assert_not_called()
+                finally:
+                    service._idle_tick_lock.release()
+                with patch.object(adapter, 'canonical_chat', side_effect=lambda name: 'test' if name == 'alias' else name):
+                    result = service.send_manual_idle_video('alias')
+                assert result['ok'] and result['sent'] and not result['partial']
+                pick.assert_called_once_with(['Python'], 'test')
+                mark.assert_called_once_with('test', video)
+                assert adapter.sent[0] == ('test', video.url)
+                assert 2 <= len(result['bubbles']) <= 3 and all(len(s) <= 15 for s in result['bubbles'][1:])
+                assert all(chat == 'test' for chat, text in adapter.sent)
+                assert service._idle_chats['test']['sent']
+                meta = memory.recent('test')[-1]['meta']
+                assert meta['manual'] and meta['video']['bvid'] == video.bvid
+                assert video.title in memory.recent('test')[-1]['content'] and video.url in memory.recent('test')[-1]['content']
+                assert video.bvid in BilibiliVideoStore(base/'videos.json')._sent['test']
+                mark.reset_mock(); adapter.sent.clear()
+                with patch.object(service.idle_videos, 'pick', return_value=None):
+                    assert not service.send_manual_idle_video('test')['ok']
+                assert not adapter.sent
+                with patch.object(adapter, 'send_text', return_value=SendResult(False, 'offline')):
+                    assert not service.send_manual_idle_video('test')['sent']
+                mark.assert_not_called()
+                with patch.object(adapter, 'send_text', side_effect=[SendResult(True), SendResult(False, 'offline')]):
+                    result = service.send_manual_idle_video('test')
+                assert not result['ok'] and result['partial'] and result['sent']
+                assert result['bubbles'] == [video.url]
+                assert memory.recent('test')[-1]['meta']['bubbles'] == [video.url]
+                mark.assert_called_once_with('test', video)
+                mark.reset_mock()
+                def stopped(*args):
+                    service._running = False
+                    return video
+                with patch.object(service.idle_videos, 'pick', side_effect=stopped):
+                    assert not service.send_manual_idle_video('test')['ok']
+                service._running = True
+                assert not adapter.sent
+                def changed(*args):
+                    config.target_by_name('test')['idle_video_topics'] = ['changed']
+                    return ['有点意思。']
+                with patch.object(service, '_idle_video_comments', side_effect=changed):
+                    assert not service.send_manual_idle_video('test')['ok']
+                assert not adapter.sent
+                mark.assert_not_called()
+                config.target_by_name('test')['idle_video_topics'] = ['Python']
+                with patch.object(memory, 'add_assistant', side_effect=OSError('offline')):
+                    assert service.send_manual_idle_video('test')['ok']
+                mark.assert_called_once_with('test', video)
+            with patch.object(service.idle_videos, 'pick', side_effect=RuntimeError('offline')):
+                assert not service.send_manual_idle_video('test')['ok']
+            assert not service._idle_tick_lock.locked()
+            with patch.object(adapter, 'validate_group_chat', return_value=SendResult(False, '群名无法识别')), \
+                    patch.object(service.idle_videos, 'pick') as search:
+                result = service.send_manual_idle_video('test')
+                assert not result['ok'] and '群名无法识别' in result['message']
+                search.assert_not_called()
+            # Exercise two non-test group destinations with real topic matching
+            # and per-group dedup, using only the fake transport and fixture API.
+            import app.bilibili_video as videos
+            group_topics = {'群A': '人工智能与计算机', '群B': 'AI和人工智能'}
+            for name, topic in group_topics.items():
+                config.add_target(name, 'group', 'arona')
+                config.target_by_name(name)['idle_video_topics'] = [topic]
+            service.idle_videos = BilibiliVideoStore(base/'group-videos.json')
+            adapter.sent.clear()
+            keywords = []
+            def groups_api(path, params, **kwargs):
+                if path.endswith('/type'):
+                    keywords.append(params['keyword'])
+                    return {'result': [{'bvid': video.bvid, 'aid': video.aid, 'title': '计算机与 AI 介绍',
+                                        'tag': '人工智能', 'pubdate': video.published_at}]}
+                return {'bvid': video.bvid, 'aid': video.aid, 'title': '计算机与 AI 介绍',
+                        'pubdate': video.published_at, 'state': 0}
+            with patch.object(videos, '_api_json', side_effect=groups_api), \
+                    patch.object(videos, '_verified_video_link', return_value=video.url):
+                for name in group_topics:
+                    assert service.send_manual_idle_video(name)['ok']
+                assert not service.send_manual_idle_video('群A')['ok']
+            assert keywords == list(group_topics.values())
+            assert [chat for chat, text in adapter.sent if text == video.url] == ['群A', '群B']
+            assert service.idle_videos._sent['群A'] == {video.bvid} == service.idle_videos._sent['群B']
+        finally:
+            service.stop(); memory.close(); training.close()
+
+
+def test_discussion() -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        base = Path(tmp)
+        config = ConfigStore(base/'config.json')
+        config.bot["probability_first_reply"] = False  # Legacy wake-up regression coverage.
+        config.set_active_profile('demo-local')
+        config.add_target('test', 'group', 'arona')
+        config.add_target('other', 'group', 'arona')
+        config.bot.update(trigger_enabled=False, group_reply_probability=1, auto_reply=True,
+                          global_cooldown=0, per_chat_cooldown=0)
+        config.target_by_name('test')['group_reply_probability'] = 1
+        memory = MemoryStore(base/'memory.db')
+        training = TrainingStore(base/'training.db', base/'files')
+        service = BotService(config, PersonaStore(base/'personas.json'), StickerStore(base/'stickers.json'),
+                             memory, training, admin_state_path=base/'admin.json')
+        adapter = FakeAdapter(config, lambda _:None)
+        service._adapter, service._running = adapter, True
+        def turn(i, sender='甲', text='这个机制有点意思', **kwargs):
+            return IncomingMessage('test', sender, text, chat_type='group', external_id=str(i), **kwargs)
+        try:
+            with patch.object(service, '_generate_and_send') as send:
+                for i in range(15):service._handle_incoming(turn(i,['甲','乙','丙','丁'][i%4]))
+                assert send.call_count == 15, '100% ordinary reply needs no discussion threshold'
+                assert not send.call_args.kwargs['discussion_reply']
+                config.target_by_name('test')['group_reply_probability']=0
+                service._handle_incoming(turn(16,'乙'))
+                assert send.call_count == 15
+                config.target_by_name('test')['group_reply_probability']=1
+                service._handle_incoming(turn(17,'乙','@甲 请帮我看看'))
+                assert send.call_count == 16, 'ordinary messages follow only the configured probability'
+            profile = {**config.active_profile(), 'provider':'openai'}
+            with patch.object(config,'active_profile',return_value=profile), \
+                    patch.object(service_module,'make_client') as factory:
+                factory.return_value.chat.return_value = LLMResult('UNKNOWN','fixture','openai',1)
+                assert service._group_audience(turn('unknown'),discussion=True) == 'ALL'
+                factory.return_value.chat.return_value = LLMResult('OTHER','fixture','openai',1)
+                assert service._group_audience(turn('private'),discussion=True) == 'OTHER'
+            with patch.object(config,'active_profile',return_value={**profile,'timeout':300}), \
+                    patch.object(service_module,'make_client') as factory:
+                factory.return_value.chat.return_value = LLMResult('ALL。','fixture','openai',1)
+                with patch.object(service,'_record_usage',side_effect=OSError('stats offline')):
+                    assert service._group_audience(turn('stats')) == 'ALL'
+                params=factory.call_args.args[0]
+                assert params['timeout']==45 and params['max_tokens']==64 and params['think'] is False
+                factory.reset_mock()
+                assert service._group_audience(turn('public',text='大家早上好'))=='ALL'
+                factory.assert_not_called()
+                factory.return_value.chat.side_effect=service_module.ModelError('模型返回了空回复。','empty content')
+                with patch.object(service_module.time,'monotonic',return_value=100):
+                    assert service._group_audience(turn('error'))=='UNKNOWN'
+                factory.reset_mock()
+                with patch.object(service_module.time,'monotonic',return_value=110):
+                    assert service._group_audience(turn('backoff'))=='UNKNOWN'
+                    assert service._group_audience(turn('public2',text='大家早上好'))=='ALL'
+                    assert service._group_audience(turn('direct-other',text='@张三 帮我看看'))=='OTHER'
+                    factory.assert_not_called()
+                factory.return_value.chat.side_effect=None
+                factory.return_value.chat.return_value=LLMResult('ALL','fixture','openai',1)
+                with patch.object(service_module.time,'monotonic',return_value=130):
+                    assert service._group_audience(turn('recovered'))=='ALL'
+                assert factory.call_count==1
+            with patch.object(service_module,'make_client') as factory:
+                factory.return_value.chat.return_value = LLMResult('这个机制挺有趣的。','fixture','mock',1)
+                with patch.object(service.idle_videos,'pick') as video:
+                    service._generate_and_send(turn('generation'),config.target_by_name('test'),0,
+                                               '这个机制有点意思',discussion_reply=True)
+                    assert '本轮允许参与公开讨论' in factory.return_value.chat.call_args.args[1]
+                    video.assert_not_called()
+        finally:
+            service.stop()
+            assert not service._discussions
+            memory.close(); training.close()
+
+
+def main() -> int:
+    test_discussion()
+    test_idle_chat()
+    test_idle_videos()
+    test_manual_idle_video()
+    original_build = service_module.build_adapter
+    service_module.build_adapter = lambda backend, config, on_message, on_status=None: FakeAdapter(
+        config, on_message, on_status
+    )
+    with tempfile.TemporaryDirectory() as tmp:
+        config = ConfigStore(Path(tmp) / "config.json")
+        config.bot["probability_first_reply"] = False  # Legacy wake-up regression coverage.
+        config.set_active_profile("demo-local")
+        config.bot.update({"reply_delay_min": 0.0, "reply_delay_max": 0.0,
+                           "max_reply_chars": 23, "max_sentence_chars": 23,
+                           "per_chat_cooldown": 0.0, "global_cooldown": 0.0,
+                           "sticker_probability": 1.0, "auto_sticker": True,
+                           "context_limit": 30, "auto_reply": True,
+                           "group_at_always_reply": True,
+                           "group_probability_reply": True,
+                           "group_reply_probability": 0.0,
+                           "trigger_enabled": False})
+        config.add_target("测试会话", "friend", "arona")["reply_probability"] = 1.0
+        group_target = config.add_target("测试群", "group", "arona", require_at=True)
+        group_target["group_reply_probability"] = 0.0
+        memory = MemoryStore(Path(tmp) / "test.db")
+        # 25 historical turns prove the context window is populated.
+        for i in range(25):
+            memory.add_user("测试会话", f"历史消息 {i}", sender="老师",
+                            external_id=f"wx:test-history:{i}")
+            memory.add_assistant("测试会话", f"历史回复 {i}", profile_name="mock")
+        training = TrainingStore(Path(tmp) / "training.db", Path(tmp) / "training_files")
+        service = BotService(config, PersonaStore(), StickerStore(), memory, training)
+        try:
+            assert service.start(), service.state().get("last_error")
+            adapter = FakeAdapter.instances[-1]
+            adapter.on_message(IncomingMessage(
+                chat="测试会话", sender="老师", content="阿洛娜，在吗？",
+                msg_type="text", external_id="wx:test-new-1", attr="friend",
+            ))
+            reply_event = wait_event(service, "reply")
+            assert reply_event["chat"] == "测试会话"
+            assert adapter.sent, "reply text should be sent"
+            assert "阿洛娜" in adapter.sent[-1][1]
+            assert reply_event["context_count"] >= 20, "at least 20 context messages"
+            assert service.memory.context_count("测试会话") >= 25
+
+            adapter.on_message(IncomingMessage(
+                chat="测试会话", sender="老师", content="今天好累啊……",
+                msg_type="text", external_id="wx:test-new-2", attr="friend",
+            ))
+            second = wait_event(service, "reply")
+            assert second["sticker"], "mock tired reply should include a sticker"
+            assert adapter.files, "sticker file should be sent through adapter"
+
+            bot_text = adapter.sent[-1][1]
+            adapter.on_message(IncomingMessage(
+                chat="测试会话", sender="测试账号", content="自己的消息",
+                msg_type="text", external_id="wx:test-self", attr="self",
+                direction="out", origin="self",
+            ))
+            time.sleep(0.3)
+            assert len(adapter.sent) == 2, "self messages must be ignored"
+            manual_count = service.memory.context_count("测试会话")
+            adapter.on_message(IncomingMessage(
+                chat="测试会话", sender="测试账号", content="这是老师手动补充的一句",
+                msg_type="text", external_id="wx:test-manual", attr="self",
+                direction="out", origin="self",
+            ))
+            time.sleep(0.3)
+            assert len(adapter.sent) == 2, "manually sent messages must not be answered"
+            assert service.memory.context_count("测试会话") == manual_count + 1, \
+                "manual outgoing message is stored as context"
+            latest = service.memory.recent("测试会话", 1)[0]
+            assert latest["sender"] == "测试账号" and latest["meta"]["manual"] is True
+            # The UI echo of ARONA's own successful send must not be stored twice.
+            echo_count = service.memory.context_count("测试会话")
+            adapter.on_message(IncomingMessage(
+                chat="测试会话", sender="测试账号", content=bot_text,
+                msg_type="text", external_id="wx:test-echo", attr="self",
+                direction="out", origin="self",
+            ))
+            time.sleep(0.3)
+            assert len(adapter.sent) == 2
+            assert service.memory.context_count("测试会话") == echo_count, \
+                "bot echo must not create duplicate context"
+
+            # Whitelist and group @ filtering.
+            adapter.on_message(IncomingMessage(
+                chat="不在白名单", sender="陌生人", content="@阿洛娜 在吗",
+                msg_type="text", external_id="wx:test-other", attr="friend",
+            ))
+            adapter.on_message(IncomingMessage(
+                chat="测试群", sender="群友", content="大家早上好",
+                msg_type="text", external_id="wx:test-group-1", attr="friend",
+                chat_type="group",
+            ))
+            time.sleep(0.5)
+            assert len(adapter.sent) == 2, "whitelist and group without @ must not reply"
+            adapter.on_message(IncomingMessage(
+                chat="测试群", sender="群友", content="@阿洛娜 今天天气真好",
+                msg_type="text", external_id="wx:test-group-2", attr="friend",
+                chat_type="group",
+            ))
+            group_reply = wait_event(service, "reply")
+            assert group_reply["chat"] == "测试群"
+            assert len(adapter.sent) == 3
+
+            # With probability at 100%, a non-@ group message replies too.
+            config.bot["group_reply_probability"] = 1.0
+            group_target["group_reply_probability"] = 1.0
+            adapter.on_message(IncomingMessage(
+                chat="测试群", sender="群友", content="大家随便聊聊",
+                msg_type="text", external_id="wx:test-group-3", attr="friend",
+                chat_type="group",
+            ))
+            probability_reply = wait_event(service, "reply")
+            assert probability_reply["chat"] == "测试群"
+            assert len(adapter.sent) == 4
+
+            # A 100% draw routes every ordinary message without an addressee veto.
+            with patch.object(service,'_generate_and_send') as routed:
+                for index,text in enumerate(['@张三 在吗','你吃饭了吗','@张三 阿洛娜好可爱']):
+                    service._handle_incoming(IncomingMessage('测试群','群友',text,chat_type='group',external_id=f'audience-other-{index}'))
+                assert routed.call_count==3
+            # An @ still must get a reply even when the legacy @-always toggle
+            # is off; the requirement is stronger than the old probability rule.
+            config.bot["group_at_always_reply"] = False
+            config.bot["group_reply_probability"] = 0.0
+            group_target["group_reply_probability"] = 0.0
+            adapter.on_message(IncomingMessage(
+                chat="测试群", sender="群友", content="@阿洛娜 在吗",
+                msg_type="text", external_id="wx:test-group-4", attr="friend",
+                chat_type="group",
+            ))
+            time.sleep(0.4)
+            assert len(adapter.sent) == 5, "@ must always get a reply"
+
+            # Exercise the real generation and send path with unusable model output.
+            config.bot.update({"auto_sticker": False, "voice_enabled": False,
+                               "quote_reply": False, "max_reply_chars": 23})
+            incoming = IncomingMessage(chat="测试群", sender="群友", content="@阿洛娜 帮帮我",
+                                       msg_type="text", chat_type="group")
+            class Client:
+                def __init__(self, replies):
+                    self.replies = iter(replies)
+
+                def chat(self, *args):
+                    value = next(self.replies)
+                    if isinstance(value, Exception):
+                        raise value
+                    return LLMResult(value, "test", "mock", 1)
+
+            fallback_outputs = []
+            def check_reply(replies, expected=None):
+                # Independent length/fallback cases use real distinct input rows.
+                # Explicit repetition is intentional here; transport dedupe has its own suite.
+                case_incoming = replace(incoming, content=incoming.content + '，再说一遍')
+                reply_row=service._store_user(case_incoming,case_incoming.content)
+                before = len(adapter.sent)
+                with patch.object(service_module, "make_client", return_value=Client(replies)):
+                    service._generate_and_send(case_incoming, group_target, reply_row, "帮帮我", force_reply=True)
+                sent = [text for _, text in adapter.sent[before:]]
+                if expected is None:
+                    assert len(sent) == 1 and 0 < len(sent[0]) <= 23
+                    assert '抱歉' not in sent[0] and '答不上来' not in sent[0]
+                    assert not service._looks_incomplete_reply(sent[0])
+                    fallback_outputs.extend(sent)
+                else:
+                    assert sent == expected
+
+            long_sentence = "这是一句没有合适断句位置而且长度明显超过限制的回答需要完整处理"
+            config.bot['replace_punctuation'] = True
+            check_reply(['第一句话完整自然，继续往下说。第二句话也完整自然，结束啦。'],
+                        ['第一句话完整自然 继续往下说', '第二句话也完整自然 结束啦'])
+            config.bot['replace_punctuation'] = False
+            long_parts = service._split_reply_messages(long_sentence, [], False, 23, 23)
+            assert ''.join(long_parts) == long_sentence + '。' and all(len(s) <= 23 for s in long_parts)
+            check_reply([long_sentence, RuntimeError("rewrite failed")], long_parts)
+            check_reply([long_sentence, ""], long_parts)
+            check_reply(["第一句话是完整的。第二句话也是完整的。第三句话也完整。", ""],
+                        ["第一句话是完整的。", "第二句话也是完整的。第三句话也完整。"])
+            check_reply(["先把设置保存下来。\n然后重新打开程序看看。"],
+                        ["先把设置保存下来。", "然后重新打开程序看看。"])
+            check_reply([RuntimeError("model failed")])
+            check_reply([RuntimeError("model failed")])
+            check_reply(["", ""])
+            assert len(set(fallback_outputs)) >= 2, 'fallback wording must vary'
+            before = len(adapter.sent)
+            with patch.object(service_module, 'make_client', return_value=Client([RuntimeError('offline')])):
+                service._generate_and_send(incoming, group_target, service._store_user(incoming, incoming.content), '帮帮我', force_reply=False)
+            assert len(adapter.sent) == before + 1, 'eligible ordinary replies also get a fallback'
+            assert 0 < len(adapter.sent[-1][1]) <= 23 and '抱歉' not in adapter.sent[-1][1]
+            before = len(adapter.sent)
+            with patch.object(service_module, 'make_client', side_effect=RuntimeError('client initialization failed')):
+                service._generate_and_send(incoming, group_target, service._store_user(incoming, incoming.content), '帮帮我', force_reply=False)
+            assert len(adapter.sent) == before + 1, 'client initialization errors also need a complete fallback'
+
+            # Third-person public discussion is eligible, but not a forced keyword call.
+            config.bot.update(trigger_enabled=True, trigger_semantic_check=True,
+                              group_reply_probability=1.0)
+            group_target['group_reply_probability'] = 1.0
+            before = len(adapter.sent)
+            with patch.object(service, '_keyword_addressed', return_value=False):
+                service._handle_incoming(IncomingMessage(
+                    chat='测试群', sender='群友', content='阿洛娜好可爱', chat_type='group',
+                    external_id='keyword-third-person'))
+            assert len(adapter.sent) > before
+            before = len(adapter.sent)
+            group_target['group_reply_probability'] = 0.0
+            service._handle_incoming(IncomingMessage('测试群', '群友', '阿洛娜好可爱', chat_type='group',
+                                                     external_id='keyword-third-person-zero'))
+            assert len(adapter.sent) == before + 1, 'keyword replies bypass probability'
+            group_target['group_reply_probability'] = 1.0
+            memory.add_user('测试群', 'https://example.com/article', sender='群友')
+            with patch.object(service_module, 'read_card', return_value='网页资料') as read:
+                incoming.content = '阿洛娜看看这个'
+                enriched = service._shared_content(incoming, incoming.content)
+                assert '网页资料' in enriched
+                assert read.call_args.args[0].url == 'https://example.com/article'
+            # A semantic decision may accept a call that the old regex misses.
+            profile = {**config.active_profile(), 'provider': 'openai'}
+            with patch.object(config, 'active_profile', return_value=profile):
+                with patch.object(service_module, 'make_client', return_value=Client(['YES'])):
+                    assert service._keyword_addressed(incoming, ['阿洛娜'])
+                with patch.object(service_module, 'make_client', return_value=Client(['NO'])):
+                    assert not service._keyword_addressed(incoming, ['阿洛娜'])
+                for decision, allowed in [('BOT', True), ('ALL', True), ('OTHER', False), ('UNKNOWN', False), ('YES', False)]:
+                    candidate = IncomingMessage('测试群', '群友', '这个原理是什么', chat_type='group')
+                    with patch.object(service_module, 'make_client', return_value=Client([decision])):
+                        assert service._group_audience_allowed(candidate) == allowed
+                with patch.object(service_module, 'make_client', return_value=Client([RuntimeError('offline')])):
+                    assert not service._group_audience_allowed(candidate)
+                    assert service._group_audience_allowed(IncomingMessage('测试群', '群友', '大家早上好', chat_type='group'))
+                with patch.object(service_module, 'make_client') as client:
+                    assert not service._group_audience_allowed(IncomingMessage('测试群', '群友', '@张三 你好', chat_type='group'))
+                    client.assert_not_called()
+
+            # Display punctuation replacement must not strip speech punctuation.
+            config.bot.update(voice_enabled=True, voice_probability=1.0, replace_punctuation=True)
+            with patch.object(service, '_send_voice_reply', return_value=True) as voice:
+                check_reply(['我在呢，别着急。'], [])
+                assert voice.call_args.args[1] == '我在呢，别着急。'
+                assert memory.recent('测试群')[-1]['meta']['voice_sent'] is True
+
+            # Explicit sound requests override automatic voice settings; the
+            # selected chat, max length and text fallback remain enforced.
+            config.bot.update(voice_enabled=False, voice_probability=0, voice_max_chars=30,
+                              replace_punctuation=False)
+            saved_content = incoming.content
+            incoming.content = '发个语音喵一下'
+            with patch.object(service,'_send_voice_reply',return_value=True) as voice:
+                check_reply(['语音发不了呀，猫叫一声喵可以。'],[])
+                assert '喵' in voice.call_args.args[1] and '发不了' not in voice.call_args.args[1]
+            incoming.content = '阿洛娜，喵一声'
+            with patch.object(service, '_send_voice_reply', return_value=True) as voice:
+                check_reply(['喵～'], [])
+                assert voice.call_args.args[0] == '测试群' and '喵' in voice.call_args.args[1]
+            with patch.object(service, '_send_voice_reply', return_value=False) as voice:
+                check_reply(['喵。'], ['喵。'])
+                voice.assert_called_once()
+                assert memory.recent('测试群')[-1]['meta']['voice_sent'] is False
+            config.bot['voice_max_chars'] = 8
+            incoming.content = '请用语音回答我'
+            with patch.object(service, '_send_voice_reply',return_value=True) as voice:
+                check_reply(['这是一句完整的语音回复。'], [])
+                assert voice.call_count>=2 and all(len(c.args[1])<=8 for c in voice.call_args_list)
+            config.bot['voice_max_chars'] = 30
+            incoming.content='请用语音回答我'
+            config.bot['voice_max_chars']=8
+            long_voice='先把设置保存下来。然后重新打开程序看看。'
+            expected_parts=service._split_reply_messages(long_voice,[],False,8,8)
+            with patch.object(service,'_send_voice_reply',side_effect=[True,False]) as voice:
+                check_reply([long_voice],expected_parts[1:])
+                assert voice.call_count==2 and len(memory.recent('测试群')[-1]['meta']['voice_bubbles'])==1
+            config.bot['voice_max_chars']=30
+            for request in ('阿洛娜，不要用语音回复我', '小明说“阿洛娜，喵一声”'):
+                incoming.content = request
+                with patch.object(service, '_send_voice_reply') as voice:
+                    check_reply(['我在听呢。'], ['我在听呢。'])
+                    voice.assert_not_called()
+            incoming.content = saved_content
+            incoming.content = '阿洛娜，不要发语音，只用文字回复'
+            config.bot.update(voice_enabled=True, voice_probability=1)
+            with patch.object(service, '_send_voice_reply') as voice:
+                check_reply(['我在听呢。'], ['我在听呢。'])
+                voice.assert_not_called()
+            incoming.content = saved_content
+
+            # Manual voice tests must use the selected (possibly unsaved) preset
+            # even when automatic voice/probability settings are disabled.
+            config.bot.update(voice_enabled=False, voice_probability=0)
+            assert not service.send_test_voice('  ')['ok']
+            with patch.object(service, '_send_voice_reply', return_value=True) as voice:
+                before = len(adapter.sent)
+                result = service.send_test_voice('test', preset_id='plana')
+                assert result['ok'] and result['voice']
+                assert len(adapter.sent) == before
+                voice.assert_called_once_with('test', '你好，语音测试。', preset_id='plana')
+            with patch.object(service, '_send_voice_reply', return_value=False):
+                result = service.send_test_voice('test')
+                assert not result['ok'] and result['fallback']
+                assert adapter.sent[-1] == ('test', '你好，语音测试。')
+                with patch.object(adapter, 'send_text', return_value=SendResult(False, 'offline')):
+                    assert not service.send_test_voice('test')['fallback']
+            service._voice_test_lock.acquire()
+            try:
+                with patch.object(service, '_send_voice_reply') as voice:
+                    assert not service.send_test_voice('test')['ok']
+                    voice.assert_not_called()
+            finally:
+                service._voice_test_lock.release()
+            with patch.object(adapter, 'connected', False), patch.object(adapter, 'send_text') as send:
+                assert not service.send_test_voice('test')['ok']
+                send.assert_not_called()
+
+            # Test news uses the named group independently of scheduling, and
+            # cancels a slow collection if connection changes before sending.
+            def cancelled_voice(*args, **kwargs):
+                service._running = False
+                return False
+            try:
+                with patch.object(service, '_send_voice_reply', side_effect=cancelled_voice), \
+                        patch.object(adapter, 'send_text') as send:
+                    assert not service.send_test_voice('test')['ok']
+                    send.assert_not_called()
+            finally:
+                service._running = True
+            assert not service.send_test_news('')['ok']
+            with patch.object(adapter, 'connected', False):
+                assert not service.send_test_news('test')['ok']
+            def fake_news(sender, target=None, **kwargs):
+                assert target == {'name': 'test', 'type': 'group'} and kwargs['test_mode']
+                result = sender.send_text(target['name'], '新闻测试')
+                return {'sent': result.ok, 'reason': result.message}
+            with patch.object(service.news, 'run', side_effect=fake_news):
+                assert service.send_test_news('test')['ok']
+                assert adapter.sent[-1] == ('test', '新闻测试')
+            def stopped_news(sender, **kwargs):
+                with patch.object(service, '_running', False):
+                    assert not sender.send_text('test', '取消发送').ok
+                return {'sent': False, 'reason': 'cancelled'}
+            with patch.object(service.news, 'run', side_effect=stopped_news), \
+                    patch.object(adapter, 'send_text') as send:
+                assert not service.send_test_news('test')['ok']
+                send.assert_not_called()
+            service._news_test_lock.acquire()
+            try:
+                assert not service.send_test_news('test')['ok']
+            finally:
+                service._news_test_lock.release()
+            with patch.object(service.news, 'run', side_effect=RuntimeError('offline')):
+                assert not service.send_test_news('test')['ok']
+            assert not service._news_test_lock.locked()
+
+            # Synthesis keeps persona parameters and submits encoded AMR directly.
+            import numpy as np
+            from app.tts import AudioClip
+            path = config.path.parent / 'voice.amr'
+            def encoded(clip):
+                path.write_bytes(b'#!AMR\n')
+                return path
+            def accepted(chat, file):
+                assert adapter._transport_lock._is_owned()
+                assert chat == 'test' and file.is_file()
+                return SendResult(True, status='acknowledged')
+            with patch('app.service.make_tts') as factory, \
+                    patch('app.native_voice.encode_clip',side_effect=encoded), \
+                    patch.object(adapter,'send_voice',side_effect=accepted,create=True) as submit:
+                factory.return_value.synthesize.return_value=AudioClip(np.ones(4800,dtype=np.float32)*.01)
+                assert service.send_test_voice('test',preset_id='plana')['ok']
+                assert not path.exists()
+                submit.assert_called_once()
+                assert factory.return_value.synthesize.call_args.args[1].rate == service.voice_presets.get('plana')['rate']
+            # A successful @ does not open a probability-bypassing dialogue.
+            service._followups.clear()
+            config.bot.update(group_probability_reply=False,trigger_enabled=False,
+                              per_chat_cooldown=600,global_cooldown=0,voice_enabled=False,auto_sticker=False)
+            before=len(adapter.sent)
+            service._handle_incoming(IncomingMessage('测试群','群友','@阿洛娜 在吗',chat_type='group',external_id='new-policy-at'))
+            assert len(adapter.sent)>before and not service._followups
+            before=len(adapter.sent)
+            service._handle_incoming(IncomingMessage('测试群','群友','继续说说',chat_type='group',external_id='new-policy-follow'))
+            assert len(adapter.sent)==before
+        finally:
+            service.stop()
+            assert not service._followups
+            service.memory.close()
+            training.close()
+    service_module.build_adapter = original_build
+    print("BOT SERVICE TEST PASSED")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
