@@ -4,7 +4,11 @@ from unittest.mock import patch
 import tempfile,plistlib,shutil,subprocess,json,os,hashlib
 import installer_core as core
 root=Path(__file__).resolve().parent.parent
-assistant=root/'packaging/.build/apps/Wemac-auto 安装助手.app';payload=root/'packaging/payload'
+host_voice=Path.home()/'Library/Application Support/WemacAuto/Arona/character_voice'
+flavor=os.environ.get('WEMAC_PACKAGE_FLAVOR','offline')
+name={'online':'Aronabot-MacOS 安装助手.app','sdk':'Wemac-auto SDK 安装助手.app','offline':'Wemac-auto 安装助手.app'}[flavor]
+assistant=root/'packaging/.build/apps'/name
+payload=root/'packaging/.build/online-payload' if flavor=='online' else (root/'packaging/.build/sdk-payload' if flavor=='sdk' else root/'packaging/payload')
 with tempfile.TemporaryDirectory(prefix='wemac-install-fixture-') as td:
     base=Path(td);source=base/'WeChat.app'
     (source/'Contents/MacOS').mkdir(parents=True);(source/'Contents/Resources').mkdir()
@@ -15,7 +19,17 @@ with tempfile.TemporaryDirectory(prefix='wemac-install-fixture-') as td:
     for name in ['wechat.dylib','MultiMediaDyn']:shutil.copy2(payload/'libaumac_completion.dylib',source/'Contents/Resources'/name)
     stages=[]
     with patch.object(core,'validate_source',return_value=source),patch.object(core,'signing_plan',return_value=[(Path('.'),core.NEW_ID,{})]),patch('pathlib.Path.home',return_value=base/'fake-home'):
-        installed=core.install(source,base/'自定义安装目录',assistant,payload,base/'data',lambda n,s:stages.append((n,s)))
+        if flavor=='online':
+            import online_models
+            actual_cache=host_voice
+            def cached_download(asset,cache,progress):
+                path=actual_cache/asset['file']
+                assert online_models.sha256(path)==asset['sha256']
+                progress(asset['size']);return path
+            with patch.object(online_models,'download_asset',side_effect=cached_download):
+                installed=core.install(source,base/'自定义安装目录',assistant,payload,base/'data',lambda n,s:stages.append((n,s)))
+        else:
+            installed=core.install(source,base/'自定义安装目录',assistant,payload,base/'data',lambda n,s:stages.append((n,s)))
     assert stages[-1][0]==100
     assert plistlib.loads((source/'Contents/Info.plist').read_bytes())['CFBundleIdentifier']==core.OLD_ID
     assert plistlib.loads((installed/'Contents/Info.plist').read_bytes())['CFBundleIdentifier']=='com.wemac.auto.arona'
@@ -24,6 +38,9 @@ with tempfile.TemporaryDirectory(prefix='wemac-install-fixture-') as td:
     assert Path(profile['corePath']).is_file() and Path(profile['nativeDatabase']['bridge']['path']).is_file()
     check=subprocess.run([str(installed/'Contents/MacOS/Wemac-auto 安装助手'),'--package-check'],env=dict(os.environ,ARONA_DATA_DIR=str(base/'data')),capture_output=True,text=True,timeout=45)
     print(check.stdout,check.stderr[-1000:]);assert check.returncode==0
+    cli=subprocess.run([str(installed.parent/'bin/wechat-aumac'),'--help'],capture_output=True,text=True,timeout=30)
+    assert cli.returncode==0 and 'native-send' in cli.stdout
+    print('INSTALLED_CLI_HELP_PASS')
     voice=base/'data/character_voice'
     if voice.exists():
         reference=Path.home()/'Library/Application Support/WemacAuto/Arona/character_voice/references/arona/reference.wav'
@@ -35,7 +52,7 @@ with tempfile.TemporaryDirectory(prefix='wemac-install-fixture-') as td:
                      't2s_weights':'models/base/s1-v2.ckpt',
                      'vits_weights':'models/arona/normal_e8_s1536.pth'}
             (voice/'profiles/arona.json').write_text(json.dumps(profile))
-            worker=payload.parent.parent/'bot/scripts/character_voice_worker.py'
+            worker=root/'bot/scripts/character_voice_worker.py'
             # This local-only reference is added after installation exclusively
             # inside the disposable fixture. It is never added to the package.
             synth=subprocess.run([str(voice/'runtime/bin/python3'),str(worker),'--character','arona','--text','老师，今天也请多指教。','--output',str(base/'preview.wav')],

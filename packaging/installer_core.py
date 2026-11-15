@@ -118,6 +118,10 @@ def install(source,destination,assistant,payload,data_dir,progress=lambda n,s:No
         run(['/usr/bin/codesign','--force','--deep','--sign','-','--timestamp=none',installed_app])
         run(['/usr/bin/codesign','--verify','--deep','--strict',installed_app])
         shutil.copytree(payload/'sdk',stage/'sdk')
+        (stage/'bin').mkdir()
+        cli=stage/'bin/wechat-aumac'
+        cli.write_text('#!/bin/sh\nWEMAC_INSTALL_ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)"\nexec "$WEMAC_INSTALL_ROOT/Wemac-auto.app/Contents/MacOS/Wemac-auto 安装助手" --sdk-cli "$@"\n')
+        cli.chmod(0o755)
         (stage/'lib').mkdir();shutil.copy2(payload/'native-db-gate.dylib',stage/'lib/native-db-gate.dylib')
         shutil.copy2(payload/'libopencore-amrnb.dylib',stage/'lib/libopencore-amrnb.dylib')
         profile=json.loads((payload/'native-profile.json').read_text())
@@ -133,7 +137,8 @@ def install(source,destination,assistant,payload,data_dir,progress=lambda n,s:No
         (data_dir/'lib').mkdir();shutil.copy2(stage/'lib/libopencore-amrnb.dylib',data_dir/'lib/libopencore-amrnb.dylib')
         archive=payload/'character-voice.tar.gz'
         if archive.is_file():
-            progress(86,'安装角色语音离线推理环境与公开模型（不含私人录音）')
+            online=(payload/'online-models.json').is_file()
+            progress(80 if online else 86,'安装角色语音运行环境（不含私人录音）')
             manifest=json.loads((payload/'character-voice.json').read_text())
             extracted=0;total=max(1,manifest['uncompressed_bytes']);last_percent=-1
             with tarfile.open(archive) as resources:
@@ -143,13 +148,17 @@ def install(source,destination,assistant,payload,data_dir,progress=lambda n,s:No
                     percent=min(100,int(100*extracted/total))
                     if percent!=last_percent:
                         last_percent=percent
-                        progress(86+min(10,percent//10),f'安装离线语音资源 {percent}%')
+                        progress((80+min(8,percent*8//100)) if online else (86+min(10,percent//10)),f'解压语音运行环境 {percent}%')
             # No venv prefix or system Python is needed by the portable runtime.
             run([data_dir/'character_voice/runtime/bin/python3','-c',
                  'import torch,numpy,soundfile,transformers; print("voice runtime ready")'])
+            if online:
+                from online_models import install_models
+                install_models(data_dir/'character_voice',payload/'online-models.json',progress)
         (stage/'installation.json').write_text(json.dumps({'version':'0.3.0','bundle_id':NEW_ID,'account_data_copied':False},indent=2))
         stage.rename(destination);committed=True
-        progress(100,'安装完成。首次运行请登录独立微信并配置模型 API。')
+        sdk_only=(payload/'product.json').is_file() and json.loads((payload/'product.json').read_text()).get('product')=='sdk'
+        progress(100,'SDK 安装完成。请登录独立微信并使用命令行入口。' if sdk_only else '安装完成。首次运行请登录独立微信并配置模型 API。')
         return destination/'Wemac-auto.app'
     except BaseException:
         if created_data:shutil.rmtree(data_dir)
