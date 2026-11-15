@@ -73,6 +73,7 @@ def main() -> int:
         root.geometry(f'{root.minsize()[0]}x{root.minsize()[1]}')
         root.update()
         home._draw()
+        root.update_idletasks()  # Tk applies place geometry in the idle queue.
         assert set(home.tiles) == set((
             'dashboard', 'debug', 'agent', 'monitor', 'stickers', 'targets', 'listen_reply',
             'personas', 'models', 'training', 'logs', 'settings'))

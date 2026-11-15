@@ -10,7 +10,12 @@ REV='4ddc9ee241f6028d724346acda190155dc98aaf6'
 BASE='https://raw.githubusercontent.com/ba-archive/blue-archive/'+REV+'/'
 CTX=ssl.create_default_context(cafile=certifi.where())
 def get(url):
- with urllib.request.urlopen(url,context=CTX,timeout=40) as response:return json.load(response)
+ for attempt in range(3):
+  try:
+   with urllib.request.urlopen(url,context=CTX,timeout=40) as response:return json.load(response)
+  except (OSError,ValueError):
+   if attempt==2:raise
+   time.sleep(2*(attempt+1))
 def main():
  folder=DATA/'local_corpus/blue_archive';folder.mkdir(parents=True,exist_ok=True)
  store=TrainingStore();lock=threading.Lock();report={'date':datetime.date.today().isoformat(),'revision':REV,'characters':0,'stories':0,'failures':[]}
