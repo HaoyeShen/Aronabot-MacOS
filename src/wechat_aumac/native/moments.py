@@ -159,6 +159,34 @@ def text_post_request(sender, text, *, visibility, client_id, timestamp):
     return payload,xml.decode('utf-8')
 
 
+def image_post_request(sender,text,media,*,visibility,client_id,timestamp):
+    """Build one image post from a validated native CDN upload result."""
+    from urllib.parse import urlsplit
+    _payload,xml=text_post_request(sender,text,visibility=visibility,client_id=client_id,timestamp=timestamp)
+    if media.get('status')!='acknowledged' or media.get('return_code')!=0:
+        raise ValueError('An acknowledged native SNS image upload is required')
+    width,height,size=(media.get(k) for k in ('width','height','uploaded_bytes'))
+    if (any(isinstance(x,bool) or not isinstance(x,int) or x<=0 for x in (width,height,size))
+            or width*height>16_000_000 or size>8*1024*1024):raise ValueError('Invalid SNS image dimensions/length')
+    for name in ('url','thumb'):
+        value=media.get(name,'');u=urlsplit(value)
+        if (not value or len(value)>8192 or u.scheme not in ('http','https') or u.hostname!='mmsns.qpic.cn'
+                or u.username or u.password or u.port is not None or u.fragment or not u.path.startswith('/mmsns/')):
+            raise ValueError('Invalid native SNS media URL')
+    root=ET.fromstring(xml);content=root.find('ContentObject');content.find('contentStyle').text='1'
+    item=ET.SubElement(ET.SubElement(content,'mediaList'),'media')
+    for name,value in [('id','0'),('type','2'),('title',''),('description',''),('private','0'),('userData',''),('subType','0')]:
+        ET.SubElement(item,name).text=value
+    dimensions={'width':str(width),'height':str(height)}
+    ET.SubElement(item,'videoSize',dimensions)
+    for name in ('url','thumb'):ET.SubElement(item,name,{'type':'1'}).text=media[name]
+    ET.SubElement(item,'size',{**dimensions,'totalSize':str(size)})
+    raw=ET.tostring(root,encoding='utf-8');privacy=1 if visibility=='private' else 0
+    payload=(blob(1,base_request_placeholder())+blob(2,integer(1,len(raw))+blob(2,raw))
+             +integer(3,0)+integer(5,privacy)+integer(6,0)+blob(7,client_id))
+    return payload,raw.decode('utf-8')
+
+
 def parse_objectop_response(data):
     fields=decode(data);code=_base_code(fields)
     if code!=0:return {'status':'rejected','return_code':code}

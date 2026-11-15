@@ -21,11 +21,11 @@ with tempfile.TemporaryDirectory(prefix='wemac-amr-build-') as tmp:
     build=folder/'objects';build.mkdir()
     def compile(item):
         index,path=item;obj=build/f'{index}.o'
-        subprocess.run(['clang++','-std=c++11','-Os','-fPIC',*[arg for p in include for arg in ('-I',str(p))],'-c',str(path),'-o',str(obj)],check=True,capture_output=True)
+        subprocess.run(['clang++','-mmacosx-version-min=13.0','-std=c++11','-Os','-fPIC',*[arg for p in include for arg in ('-I',str(p))],'-c',str(path),'-o',str(obj)],check=True,capture_output=True)
         return obj
     with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:objects=list(pool.map(compile,enumerate(files)))
     destination=DATA/'lib';destination.mkdir(parents=True,exist_ok=True)
     library=destination/'libopencore-amrnb.dylib'
-    subprocess.run(['clang++','-dynamiclib',*[str(p) for p in objects],'-o',str(library)],check=True,capture_output=True)
+    subprocess.run(['clang++','-mmacosx-version-min=13.0','-dynamiclib',*[str(p) for p in objects],'-o',str(library)],check=True,capture_output=True)
     for name in ('OPENCORE-AMR-LICENSE','OPENCORE-AMR-NOTICE'):shutil.copy2(ROOT/'vendor'/name,destination/name)
     print('AMR encoder installed:',library,'sources:',len(files))

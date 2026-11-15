@@ -180,7 +180,7 @@ class DailyDiary:
                     image=None;record['image_attached']=False
                     records[key]=record;atomic_write_json(self.path,records)
                 result=adapter.publish_moment(record['text'],image)
-            record['status']='published' if result.ok else ('uncertain' if result.detail=='uncertain' else 'draft')
+            record['status']='published' if result.ok else ('uncertain' if result.status=='unconfirmed' or result.detail=='uncertain' else 'draft')
             record['message']=result.message;record['updated_at']=now.isoformat()
             records[key]=record;atomic_write_json(self.path,records)
             self.retry_after=time.monotonic()+300

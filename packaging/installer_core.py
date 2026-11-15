@@ -24,6 +24,14 @@ def remap(v):
     if isinstance(v,dict):return {remap(k):remap(x) for k,x in v.items()}
     return v
 
+def select_codec(target,name):
+    target=Path(target).resolve()
+    preferred=target/'Contents/Resources/MultiMediaDyn.framework/Versions/A'/name
+    if preferred.is_file() and preferred.resolve().is_relative_to(target):return preferred
+    candidates={p.resolve() for p in target.rglob(name) if p.is_file() and p.resolve().is_relative_to(target)}
+    if len(candidates)!=1:raise ValueError('未找到唯一的微信图片解码库。')
+    return next(iter(candidates))
+
 def validate_source(source):
     source=Path(source).resolve()
     info=plistlib.loads((source/'Contents/Info.plist').read_bytes())
@@ -99,6 +107,12 @@ def install(source,destination,assistant,payload,data_dir,progress=lambda n,s:No
                     if OLD_ID.encode() in raw:p.write_bytes(raw.replace(OLD_ID.encode(),NEW_ID.encode()))
         helper=target/'Contents/Frameworks/libaumac_completion.dylib';shutil.copy2(payload/helper.name,helper)
         run(['/usr/bin/codesign','--force','--sign','-','--timestamp=none',helper])
+        sns_helper=target/'Contents/Frameworks/libwemac_sns_upload.dylib'
+        shutil.copy2(payload/sns_helper.name,sns_helper)
+        run(['/usr/bin/codesign','--force','--sign','-','--timestamp=none',sns_helper])
+        db_helper=target/'Contents/Frameworks/native-db-gate.dylib'
+        shutil.copy2(payload/db_helper.name,db_helper)
+        run(['/usr/bin/codesign','--force','--sign','-','--timestamp=none',db_helper])
         with tempfile.TemporaryDirectory(prefix='wemac-entitlements-') as td:
             for index,(relative,identity,ent) in enumerate(plan):
                 progress(35+int(35*index/max(1,len(plan))),f'逐组件重签名 {index+1}/{len(plan)}')
@@ -124,17 +138,20 @@ def install(source,destination,assistant,payload,data_dir,progress=lambda n,s:No
         cli.chmod(0o755)
         (stage/'lib').mkdir();shutil.copy2(payload/'native-db-gate.dylib',stage/'lib/native-db-gate.dylib')
         shutil.copy2(payload/'libopencore-amrnb.dylib',stage/'lib/libopencore-amrnb.dylib')
+        shutil.copy2(payload/'libwemac-silk.dylib',stage/'lib/libwemac-silk.dylib')
         profile=json.loads((payload/'native-profile.json').read_text())
         profile.update(app=str(destination/target.name),corePath=str(destination/target.name/'Contents/Resources/wechat.dylib'),sha256=digest(target/'Contents/Resources/wechat.dylib'))
         profile['completionHelper']={'path':str(destination/target.name/'Contents/Frameworks'/helper.name),'sha256':digest(helper)}
-        profile['nativeDatabase']['bridge']={'path':str(destination/'lib/native-db-gate.dylib'),'sha256':digest(stage/'lib/native-db-gate.dylib')}
+        profile['nativeSnsUpload']['bridge']={'path':str(destination/target.name/'Contents/Frameworks'/sns_helper.name),'sha256':digest(sns_helper)}
+        profile['nativeSnsUpload']['cacheRoot']=str(Path.home()/'Library/Containers'/NEW_ID/'Data/Library/Caches/Wemac-auto/SNS')
+        profile['nativeDatabase']['bridge']={'path':str(destination/target.name/'Contents/Frameworks'/db_helper.name),'sha256':digest(db_helper)}
         codec=profile['nativeResources']['wxgfCodec'];codec_name=Path(codec['path']).name
-        candidates=list(target.rglob(codec_name))
-        if len(candidates)!=1:raise ValueError('未找到唯一的微信图片解码库。')
-        codec['path']=str(destination/target.name/candidates[0].relative_to(target));codec['sha256']=digest(candidates[0])
+        selected=select_codec(target,codec_name)
+        codec['path']=str(destination/target.name/selected.relative_to(target));codec['sha256']=digest(selected)
         data_dir.mkdir(parents=True,exist_ok=True);created_data=True
         (data_dir/'native-profile-isolated.json').write_text(json.dumps(profile,indent=2)+'\n')
         (data_dir/'lib').mkdir();shutil.copy2(stage/'lib/libopencore-amrnb.dylib',data_dir/'lib/libopencore-amrnb.dylib')
+        shutil.copy2(stage/'lib/libwemac-silk.dylib',data_dir/'lib/libwemac-silk.dylib')
         archive=payload/'character-voice.tar.gz'
         if archive.is_file():
             online=(payload/'online-models.json').is_file()

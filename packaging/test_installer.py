@@ -35,6 +35,15 @@ class InstallerTests(unittest.TestCase):
         for marker in ['/Users/','wxid_','@chatroom','sk-']:
             self.assertNotIn(marker,text)
         self.assertTrue(json.loads(text)['functions'])
+
+    def test_codec_uses_loaded_resources_framework_when_app_has_two_copies(self):
+        with tempfile.TemporaryDirectory() as td:
+            root=Path(td)/'WeChat.app'
+            for kind in ['Resources','Frameworks']:
+                file=root/f'Contents/{kind}/MultiMediaDyn.framework/Versions/A/MultiMediaDyn'
+                file.parent.mkdir(parents=True);file.write_bytes(b'fixture')
+            chosen=core.select_codec(root,'MultiMediaDyn')
+            self.assertIn('Contents/Resources',str(chosen))
     def test_sign_failure_rolls_back_only_temporary_install(self):
         with tempfile.TemporaryDirectory() as td:
             root=Path(td);source=root/'WeChat.app';(source/'Contents/Frameworks').mkdir(parents=True)

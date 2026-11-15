@@ -34,7 +34,7 @@ def cmd_hook_probe(args) -> int:
 def cmd_native(args) -> int:
     from .native import WeChatNative
 
-    sends={'native-send','native-send-image','native-send-sticker','native-send-voice','native-send-video','native-send-quote','native-revoke','native-reply'}
+    sends={'native-send','native-send-image','native-send-sticker','native-send-voice','native-send-video','native-send-quote','native-revoke','native-reply','native-moment-publish'}
     mode = ('full' if args.command in sends or args.command in {'native-moments','native-moment','native-moment-like','native-moment-comment','native-moment-unlike'} else
             'inventory' if args.command == 'native-status' else
             'codec' if args.command in {'native-codec','native-moment-draft'} else
@@ -50,6 +50,7 @@ def cmd_native(args) -> int:
     kwargs={}
     moment_action={'native-moment-like':'like','native-moment-comment':'comment','native-moment-unlike':'unlike'}.get(args.command)
     if moment_action:kwargs['moments_operations']=(moment_action,)
+    if args.command=='native-moment-publish':kwargs['moments_operations']=('publish',)
     actions=(('quote',) if args.command=='native-send-quote' or (args.command=='native-reply' and args.quote) else
              ('revoke',) if args.command=='native-revoke' else ())
     if actions:kwargs['message_operations']=actions
@@ -98,6 +99,10 @@ def cmd_native(args) -> int:
                 if wx._detached:raise WeChatAuMacError('WeChat detached; collection stopped')
             messages=wx.read(chat_id=args.chat,limit=args.limit)
             _json([wx.get_card_links(m) for m in messages if 'card' in m or 'card_error' in m] if args.command=='native-card-links' else messages)
+        elif args.command=='native-moment-publish':
+            result=(wx.publish_image_moment(args.text,args.image,visibility=args.visibility,timeout=args.timeout) if args.image else
+                    wx.publish_moment(args.text,visibility=args.visibility,timeout=args.timeout))
+            _json(result);return 0 if result['status']=='acknowledged' else 1
         elif moment_action:
             method=getattr(wx,moment_action+'_moment')
             result=(method(args.id,args.text,timeout=args.timeout) if moment_action=='comment' else
@@ -185,7 +190,7 @@ def build_parser() -> argparse.ArgumentParser:
     native_image.add_argument('path')
     native_image.set_defaults(func=cmd_native)
     for kind,help_text in [('sticker','send a GIF sticker (at most 64 KiB)'),
-                           ('voice','send AMR-NB voice (at most 64 KiB / 60 seconds)'),
+                           ('voice','send Tencent SILK or AMR-NB voice (at most 64 KiB / 60 seconds)'),
                            ('video','send MP4 video with a JPEG thumbnail')]:
         command=sub.add_parser('native-send-'+kind,help=help_text)
         command.add_argument('--profile',required=True)
@@ -225,6 +230,10 @@ def build_parser() -> argparse.ArgumentParser:
     draft=sub.add_parser('native-moment-draft',help='prepare and codec-check a text post; never publishes')
     draft.add_argument('--profile',required=True);draft.add_argument('--visibility',required=True,choices=['private','public'])
     draft.add_argument('text');draft.set_defaults(func=cmd_native)
+    publish=sub.add_parser('native-moment-publish',help='publish a text or one-image Moments post through native functions')
+    publish.add_argument('--profile',required=True);publish.add_argument('--visibility',required=True,choices=['private','public'])
+    publish.add_argument('--image');publish.add_argument('--timeout',type=_interval,default=40)
+    publish.add_argument('text');publish.set_defaults(func=cmd_native)
 
     for name in ('native-read','native-card-links'):
         command=sub.add_parser(name,help='collect native background messages'+(' and embedded card links' if name.endswith('links') else ''))

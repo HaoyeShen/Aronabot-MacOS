@@ -26,6 +26,7 @@ NAV_ITEMS = [
     ("models", "模型与 API", "◇", "MODELS"),
     ("logs", "运行日志", "≡", "LOGS"),
     ("settings", "设置", "⚙", "SETTINGS"),
+    ("moments", "朋友圈", "◉", "MOMENTS"),
 ]
 
 

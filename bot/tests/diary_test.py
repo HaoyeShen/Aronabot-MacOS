@@ -44,7 +44,7 @@ def main():
             assert adapter.publish_moment.call_count==1
             # A result whose commit is uncertain is never automatically retried.
             other=DailyDiary(service,root/'other.json')
-            adapter.publish_moment.return_value=SendResult(False,'结果待核对','uncertain')
+            adapter.publish_moment.return_value=SendResult(False,'结果待核对','no response',status='unconfirmed')
             with patch('app.diary.make_client',return_value=fake):
                 other.tick(now);other.retry_after=0;other.tick(now)
                 assert adapter.publish_moment.call_count==2

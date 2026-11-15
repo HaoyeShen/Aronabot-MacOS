@@ -64,3 +64,7 @@ PYTHONPATH=src python3 -m unittest discover -s tests -q
 
 See [native API](docs/native-api.md), [setup and stability](docs/background-send.md),
 [research files](research/README.md) and [Moments entrypoints](docs/moments-entrypoints.md).
+
+## Native SNS images and desktop voice compatibility
+
+Single-image Moments publishing and exact-post comments now use the selected client’s native CDN/SNS functions. See [usage, bounds and validation](docs/native-sns-images.md). The bot includes a Moments page and supports diary illustrations. Voice output uses 24 kHz Tencent SILK with matching metadata, verified audible on desktop.

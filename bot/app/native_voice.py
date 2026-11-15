@@ -1,4 +1,4 @@
-"""PCM synthesis previews and direct AMR-NB uploads; no recorder or virtual cable."""
+"""Local synthesis previews and wideband SILK uploads; legacy AMR remains explicit."""
 from __future__ import annotations
 import ctypes
 import os
@@ -19,6 +19,24 @@ def amr_library() -> Path:
 
 
 def encode_clip(clip) -> Path:
+    """Wideband Tencent SILK, with matching metadata on desktop and phone."""
+    import numpy as np
+    import miniaudio
+    from wechat_aumac.native.voice import encode_pcm
+    if not 0 < clip.duration <= 60:raise ValueError('语音长度须在 0–60 秒以内。')
+    samples=np.asarray(clip.samples,dtype='<f4')
+    if not np.isfinite(samples).all():raise ValueError('语音采样包含无效值。')
+    pcm=miniaudio.convert_frames(miniaudio.SampleFormat.FLOAT32,1,int(clip.sample_rate),samples.tobytes(),
+                                miniaudio.SampleFormat.SIGNED16,1,24000)
+    if len(pcm)<=59.8*24000*2:pcm=bytes(9600)+pcm
+    data=encode_pcm(pcm)
+    folder=DATA/'temp/voice';folder.mkdir(parents=True,exist_ok=True)
+    fd,name=tempfile.mkstemp(suffix='.silk',dir=folder)
+    with os.fdopen(fd,'wb') as stream:stream.write(data)
+    return Path(name)
+
+
+def encode_amr_clip(clip) -> Path:
     import numpy as np
     import miniaudio
     if not 0 < clip.duration <= 60:

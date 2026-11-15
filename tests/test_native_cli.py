@@ -25,10 +25,16 @@ class FakeNative:
     def like_moment(self,*args,**kwargs):self.calls.append(('like',args,kwargs));return {'status':'acknowledged'}
     def comment_moment(self,*args,**kwargs):self.calls.append(('comment',args,kwargs));return {'status':'acknowledged'}
     def unlike_moment(self,*args,**kwargs):self.calls.append(('unlike',args,kwargs));return {'status':'acknowledged'}
-    def publish_moment(self,*args,**kwargs):raise AssertionError('CLI must not publish')
+    def publish_moment(self,*args,**kwargs):self.calls.append(('publish',args,kwargs));return {'status':'acknowledged'}
+    def publish_image_moment(self,*args,**kwargs):self.calls.append(('publish_image',args,kwargs));return {'status':'acknowledged'}
 
 
 class NativeCLITest(unittest.TestCase):
+    def test_explicit_publishing_routes_image_and_visibility(self):
+        result,out,wx=self.run_cli(['native-moment-publish','--profile','profile','--visibility','private','--image','image.png','test'])
+        self.assertEqual(result,0);self.assertEqual(wx.options['moments_operations'],('publish',))
+        self.assertEqual(wx.options['mode'],'full');self.assertEqual(wx.calls[0][0],'publish_image')
+        self.assertEqual(wx.calls[0][1],('test','image.png'));self.assertEqual(wx.calls[0][2]['visibility'],'private')
     def run_cli(self,args):
         out=io.StringIO()
         with patch('wechat_aumac.native.WeChatNative',FakeNative),redirect_stdout(out),redirect_stderr(io.StringIO()):

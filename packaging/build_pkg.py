@@ -8,6 +8,10 @@ def run(args):subprocess.run([str(x) for x in args],check=True)
 
 def build(*,online=False,sdk_only=False):
     WORK.mkdir(exist_ok=True);DIST.mkdir(exist_ok=True)
+    native_data=WORK/'native-resources'
+    if native_data.exists():shutil.rmtree(native_data)
+    native_data.mkdir()
+    for file in (ROOT/'src/wechat_aumac/native').glob('*.js'):shutil.copy2(file,native_data/file.name)
     sdk=PAYLOAD/'sdk'
     if sdk.exists():shutil.rmtree(sdk)
     shutil.copytree(ROOT/'src',sdk/'src',ignore=shutil.ignore_patterns('__pycache__','*.pyc'))
@@ -18,7 +22,7 @@ def build(*,online=False,sdk_only=False):
     for name in ['requirements-macos.txt','requirements-character-voice.lock','requirements-reference-audio.txt']:
         shutil.copy2(ROOT/'bot'/name,sdk/name)
     license_dir=PAYLOAD/'licenses';license_dir.mkdir(exist_ok=True)
-    for name in ['OPENCORE-AMR-LICENSE','OPENCORE-AMR-NOTICE']:
+    for name in ['OPENCORE-AMR-LICENSE','OPENCORE-AMR-NOTICE','SILK-LICENSE']:
         shutil.copy2(ROOT/'bot/vendor'/name,license_dir/name)
     bundle_payload=WORK/'online-payload' if online else PAYLOAD
     if sdk_only:
@@ -54,6 +58,7 @@ def build(*,online=False,sdk_only=False):
         '--add-data',str(ROOT/'bot/data/stickers')+':data/stickers',
         '--add-data',str(ROOT/'bot/scripts')+':scripts',
         '--add-data',str(ROOT/'bot/app')+':source/app',P/'entry.py']
+    command[-1:-1]=['--add-data',str(native_data)+':wechat_aumac/native']
     run(command)
     app=WORK/'apps/Wemac-auto 安装助手.app'
     display='Wemac-auto SDK 安装助手' if sdk_only else ('Aronabot-MacOS 安装助手' if online else 'Wemac-auto 安装助手')
@@ -62,8 +67,8 @@ def build(*,online=False,sdk_only=False):
         if renamed.exists():shutil.rmtree(renamed)
         app.rename(renamed);app=renamed
     infofile=app/'Contents/Info.plist';info=plistlib.loads(infofile.read_bytes())
-    version='0.3.1' if (online or sdk_only) else '0.3.0'
-    info.update(CFBundleShortVersionString=version,CFBundleVersion='301' if online else '300',LSMinimumSystemVersion='13.0')
+    version='0.3.2'
+    info.update(CFBundleShortVersionString=version,CFBundleVersion='302',LSMinimumSystemVersion='13.0')
     infofile.write_bytes(plistlib.dumps(info))
     run(['/usr/bin/codesign','--force','--deep','--sign','-','--timestamp=none',app])
     run(['/usr/bin/codesign','--verify','--deep','--strict',app])
@@ -96,10 +101,10 @@ exit 0
     run(['/usr/bin/pkgbuild','--root',stage,'--component-plist',component_info,'--scripts',scripts,'--identifier',identity,
          '--version',version,'--install-location','/',component])
     resources=WORK/'resources';resources.mkdir(exist_ok=True)
-    (resources/'welcome.html').write_text('''<html><meta charset="utf-8"><body><h2>Wemac-auto 0.3.0</h2><p>Apple Silicon / macOS 13 或更新。系统安装完成后会打开安装助手，选择自定义安装目录和本机原版微信，点击一次开始完成复制、独立身份及逐组件重签名，并显示进度。</p><p>需要微信 4.2.0（270348）；不会复制账号数据，也不会停止或重启任何微信进程。此包不包含腾讯微信本体、私人录音、聊天、账号凭据或 API Key。</p><p>后台 SDK、机器人界面、媒体发送编码器均包含。联网模型需要配置自己的 API。角色公开模型与离线推理环境已内置；个人参考录音需要另行配置，默认近似音使用在线服务。需要允许 macOS 正常提示的权限。</p><p>此安装包未使用 Developer ID 公证，不会自动更改系统安全设置。</p></body></html>''')
+    (resources/'welcome.html').write_text('''<html><meta charset="utf-8"><body><h2>Wemac-auto 0.3.2</h2><p>Apple Silicon / macOS 13 或更新。系统安装完成后会打开安装助手，选择自定义安装目录和本机原版微信，点击一次开始完成复制、独立身份及逐组件重签名，并显示进度。</p><p>需要微信 4.2.0（270348）；不会复制账号数据，也不会停止或重启任何微信进程。此包不包含腾讯微信本体、私人录音、聊天、账号凭据或 API Key。</p><p>后台 SDK、机器人界面、媒体发送编码器均包含。联网模型需要配置自己的 API。角色公开模型与离线推理环境已内置；个人参考录音需要另行配置，默认近似音使用在线服务。需要允许 macOS 正常提示的权限。</p><p>此安装包未使用 Developer ID 公证，不会自动更改系统安全设置。</p></body></html>''')
     if online:
         welcome=resources/'welcome.html'
-        welcome.write_text(welcome.read_text().replace('0.3.0','0.3.1 在线安装版').replace('角色公开模型与离线推理环境已内置','Python 和语音推理环境已内置，约 1.2 GB 公开模型会在安装时自动联网下载并校验，无需手动安装依赖'))
+        welcome.write_text(welcome.read_text().replace('0.3.2','0.3.2 在线安装版').replace('角色公开模型与离线推理环境已内置','Python 和语音推理环境已内置，约 1.2 GB 公开模型会在安装时自动联网下载并校验，无需手动安装依赖'))
     distribution=WORK/'Distribution.xml'
     distribution.write_text('''<?xml version="1.0" encoding="utf-8"?>
 <installer-gui-script minSpecVersion="2"><title>Wemac-auto</title>
@@ -108,14 +113,14 @@ exit 0
 <welcome file="welcome.html" mime-type="text/html"/>
 <choices-outline><line choice="main"/></choices-outline>
 <choice id="main" title="Wemac-auto 安装助手"><pkg-ref id="com.wemac.auto.installer"/></choice>
-<pkg-ref id="com.wemac.auto.installer" version="0.3.0">Wemac-auto-component.pkg</pkg-ref>
+<pkg-ref id="com.wemac.auto.installer" version="0.3.2">Wemac-auto-component.pkg</pkg-ref>
 </installer-gui-script>''')
-    if online or sdk_only:distribution.write_text(distribution.read_text().replace('version="0.3.0"','version="0.3.1"'))
+    if online or sdk_only:distribution.write_text(distribution.read_text().replace('version="0.3.2"','version="0.3.2"'))
     distribution.write_text(distribution.read_text().replace('com.wemac.auto.installer',identity))
     if sdk_only:
         welcome=resources/'welcome.html'
-        welcome.write_text('<html><meta charset="utf-8"><body><h2>Wemac-auto SDK 0.3.1</h2><p>Apple Silicon / macOS 13+，微信 4.2.0（270348）。安装 SDK、独立命令行运行环境与微信副本配置；安装后打开助手选择目录并显示复制、重签名进度。不下载机器人语音模型，不包含账号或密钥。</p><p>本包未做 Developer ID 签名与公证。</p></body></html>')
-    pkg=DIST/('Wemac-auto-0.3.1-arm64-sdk.pkg' if sdk_only else ('Aronabot-MacOS-0.3.1-arm64-online.pkg' if online else 'Wemac-auto-0.3.0-arm64.pkg'))
+        welcome.write_text('<html><meta charset="utf-8"><body><h2>Wemac-auto SDK 0.3.2</h2><p>Apple Silicon / macOS 13+，微信 4.2.0（270348）。安装 SDK、独立命令行运行环境与微信副本配置；安装后打开助手选择目录并显示复制、重签名进度。不下载机器人语音模型，不包含账号或密钥。</p><p>本包未做 Developer ID 签名与公证。</p></body></html>')
+    pkg=DIST/('Wemac-auto-0.3.2-arm64-sdk.pkg' if sdk_only else ('Aronabot-MacOS-0.3.2-arm64-online.pkg' if online else 'Wemac-auto-0.3.2-arm64.pkg'))
     run(['/usr/bin/productbuild','--distribution',distribution,'--package-path',WORK,'--resources',resources,pkg])
     digest=hashlib.sha256(pkg.read_bytes()).hexdigest()
     if (online or sdk_only) and pkg.stat().st_size>=500_000_000:raise RuntimeError(f'Package exceeds 500 MB: {pkg.stat().st_size} bytes')

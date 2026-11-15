@@ -14,7 +14,7 @@
 - `references/arona`、`references/plana`：从用户新 M4A 提取的参考 WAV 及片段来源记录，不改动原始录音。
 - `profiles/arona.json`、`profiles/plana.json`：独立角色配置、参考台词、音频及权重 SHA-256、推理环境和合成验证状态。普拉娜兼容旧版 `profile.json`，新配置优先。
 
-来源：[GPT-SoVITS](https://github.com/RVC-Boss/GPT-SoVITS)、[阿洛娜权重](https://huggingface.co/xingguangcuican6666/arona-sovits)、[普拉娜权重](https://huggingface.co/xingguangcuican6666/plana-gptsovits-v2)、[基础模型](https://huggingface.co/lj1995/GPT-SoVITS)。各模型遵循其发布者许可；阿洛娜模型页标注 GPL-3.0，普拉娜模型页标注 MIT。模型权重不打包进本项目。
+来源：[GPT-SoVITS](https://github.com/RVC-Boss/GPT-SoVITS)、[阿洛娜权重](https://huggingface.co/xingguangcuican6666/arona-sovits)、[普拉娜权重](https://huggingface.co/xingguangcuican6666/plana-gptsovits-v2)、[基础模型](https://huggingface.co/lj1995/GPT-SoVITS)。各模型遵循其发布者许可；阿洛娜模型页标注 GPL-3.0，普拉娜模型页标注 MIT。模型权重不放入 Git；在线安装版在安装时下载公开权重，个人参考录音需自行配置。
 
 ## 验证和使用
 
@@ -24,7 +24,7 @@
 
 当前使用 CPU、完整精度推理；可在角色配置中显式开启 BERT 动态量化。语速与音量可调，保持参考声线时使用 `+0%`、`+0Hz`、`+0%`，清晰度处理默认为 0。语音回复中的中英混合昵称优先朗读中文部分；其余英文字母显式转换为中文字母读法，再交给中文前端，避免因英文昵称回退文字或静默漏读。这是中文字母读法，音色本身仍使用中文推理。
 
-“试听”只在本机播放。消息使用该音色时，先本地合成 PCM、编码 AMR，再经微信内部函数发送；不需要虚拟声卡，也不操作微信界面。停止机器人会结束角色推理工作进程。
+“试听”只在本机播放。消息使用该音色时，先本地合成 PCM、编码 24 kHz SILK，再经微信内部函数发送；不需要虚拟声卡，也不操作微信界面。停止机器人会结束角色推理工作进程。
 
 输出会检查音频有效性及异常长静音；发现异常时只在本机换一个随机种子重试一次，仍失败则交给现有文字回退。重试发生在发送前，不会重复上传消息。
 

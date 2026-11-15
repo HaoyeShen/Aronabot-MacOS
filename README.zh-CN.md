@@ -121,3 +121,7 @@ PYTHONPATH=src python3 -m unittest discover -s tests -q
 单元测试不发送聊天消息或发布朋友圈。后台双向实测已完成：两个账号均在后台时，
 一个账号发送 `test`，另一个账号接收并回复，发送账号再次接收到回复；前台为 Word。功能验收范围、已知限制和原生接口见
 [API 文档](docs/native-api.md)。
+
+### 朋友圈配图与原生语音更新
+
+现已支持 `publish_image_moment(text, path, visibility=...)` 及 `native-moment-publish --image`。图片上传、发布与评论均调用内部函数，已完成服务器确认和独立回读；见 [配图与评论说明](docs/native-sns-images.md)。机器人提供独立“朋友圈”页面，日记配图也使用该接口。语音默认改为 24 kHz SILK，以解决旧 AMR 语音在电脑端无声的问题。

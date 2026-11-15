@@ -16,6 +16,7 @@ from .base import BasePage
 log = logging.getLogger(__name__)
 
 DESCRIPTIONS = {
+    'moments':'发布动态 / 读取与评论',
     'dashboard': '状态总览 / 启动与停止', 'listen_reply': '触发规则 / 引用 / 语音',
     'targets': '群与好友 / 上下文 / 新闻', 'stickers': '收集每一个小心情',
     'personas': '阿洛娜与普拉娜', 'training': '资料与记忆，一点点积累',
@@ -198,7 +199,7 @@ class HomePage(BasePage):
         minor_h = int(h*.20)
         y = max(px(26), int(h*.055))
         rows = [('dashboard', 'listen_reply'), ('targets', 'stickers', 'personas'),
-                ('training', 'models', 'debug'), ('monitor', 'agent', 'logs', 'settings')]
+                ('training', 'models', 'debug'), ('moments', 'monitor', 'agent', 'logs', 'settings')]
         for ri, keys in enumerate(rows):
             th = major_h if ri == 0 else (px(49) if ri == 3 else minor_h)
             tw = (usable-gap*(len(keys)-1))//len(keys)

@@ -89,6 +89,38 @@ function wireFields(bytes) {
     }
     return fields;
 }
+// Optional, single-agent read-only research capture. Disabled in normal profiles.
+if(mode==='observe' && CONFIG.traceSnsUpload){
+    if(fn.snsTraceFactory)watches.push(Interceptor.attach(fn.snsTraceFactory,{
+        onEnter(args){
+            try{
+                emit({event:'sns_upload_factory',bytes:Array.from(new Uint8Array(args[1].readVolatile(2048))),
+                    backtrace:Thread.backtrace(this.context,Backtracer.ACCURATE).slice(0,24).map(p=>p.sub(core.base).toString())});
+            }catch(_){}
+        }
+    }));
+    watches.push(Interceptor.attach(fn.snsUploadProtoSerialize,{
+        onEnter(args){this.output=args[1];},
+        onLeave(result){
+            try{
+                const length=result.sub(this.output).toInt32();
+                if(length>0 && length<=1024*1024)emit({event:'sns_upload_wire',bytes:Array.from(new Uint8Array(this.output.readVolatile(length)))});
+            }catch(_){}
+        }
+    }));
+    watches.push(Interceptor.attach(fn.snsTraceTaskWrapper,{
+        onEnter(args){
+            try{
+                const task=args[0],size=Number(safeView(task.add(0x20),8).getBigUint64(0,true));
+                if(size<1 || size>256)return;
+                const path=safePointer(task.add(0x18)).readUtf8String(size).split('\x00')[0];
+                if(!/^\/cgi-bin\/[a-z0-9/_-]+$/i.test(path) || !/sns/i.test(path))return;
+                emit({event:'sns_task_path',cgi:path,commandId:safeU32(task.add(4)),
+                    backtrace:Thread.backtrace(this.context,Backtracer.ACCURATE).slice(0,20).map(p=>p.sub(core.base).toString())});
+            }catch(_){}
+        }
+    }));
+}
 if(['receive','full','observe'].includes(mode) && fn.parseSyncResponse)watches.push(Interceptor.attach(fn.parseSyncResponse,{
     onEnter(args){
         try{

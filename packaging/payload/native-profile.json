@@ -13,7 +13,9 @@
     "send_image_server_ack",
     "send_sticker_server_ack",
     "send_voice_server_ack",
-    "send_video_server_ack"
+    "send_video_server_ack",
+    "upload_sns_image_server_ack",
+    "publish_image_moment_server_ack"
   ],
   "functions": {
     "serializeText": {
@@ -331,6 +333,22 @@
     "resourceKeyGetter": {
       "offset": 76011788,
       "head": "ff8301d1f44f04a9fd7b05a9fd430191"
+    },
+    "snsContextGetter": {
+      "offset": 75062964,
+      "head": "08f10290006d44f9c0035fd6ffc300d1"
+    },
+    "snsCallbackFactory": {
+      "offset": 62790764,
+      "head": "f657bda9f44f01a9fd7b02a9fd830091"
+    },
+    "snsCdnSend": {
+      "offset": 96600248,
+      "head": "ff4305d1fc6f12a9f44f13a9fd7b14a9"
+    },
+    "snsRequestCopy": {
+      "offset": 56526852,
+      "head": "f44fbea9fd7b01a9fd430091f40301aa"
     }
   },
   "completionHelper": {
@@ -509,5 +527,13 @@
       "sha256": "172d2c1dc5a4556a189c76fa5befc15277b1aa88ce5330f733d488ee9acdc5ef",
       "abi": "wxam-5-bgra"
     }
+  },
+  "nativeSnsUpload": {
+    "bridge": {
+      "path": "REPLACED_AT_INSTALL",
+      "sha256": "d6cfc4b1f77b69ec4b2d0a983adbfe69d2102355ba9734fae8a3888ab401b8a5"
+    },
+    "callbackVtableOffset": 167609704,
+    "cacheRoot": "REPLACED_AT_INSTALL"
   }
 }

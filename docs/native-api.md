@@ -15,7 +15,7 @@
 | `send_image(receiver_id, path)` | PNG 单块／分块和 JPEG 已验证 | 最多 20 MiB；64 KiB 分块 |
 | `send_sticker(receiver_id, path)` | 小 GIF 已验证并撤回 | GIF，最多 64 KiB，单块 |
 | `send_video(receiver_id, path, thumbnail=..., duration_seconds=...)` | MP4 两阶段上传及撤回已验证 | 视频最多 20 MiB，JPEG 缩略图最多 64 KiB，时长由调用方提供 |
-| `send_voice(receiver_id, path)` | AMR-NB 发送及撤回已验证 | 预编码 AMR-NB，最多 64 KiB / 60 秒；SILK 未接入 |
+| `send_voice(receiver_id, path)` | SILK 与 AMR-NB 发送已验证 | 默认 24 kHz SILK，最多 64 KiB / 60 秒 |
 | `read(chat_id, limit=50)` | 原生观察缓存查询 | 最近最多 2000 条、约 32 MiB 估算内存；不查连接前历史数据库 |
 | `watch(chat_id, direction=..., timeout=None)` | 两客户端都在后台时已收取并回复 | `incoming`、`outgoing`、`both`；可设置监听截止时间 |
 | `reply(message, text, quote=False)` | 后台接收、发送、另一账号收到回复全链路验证 | 拒绝回复自己的消息和协议通知；引用回复需单独启用 quote |
@@ -130,3 +130,5 @@ full 才允许已启用的提交。原生函数指纹、核心哈希、helper �
 
 较早的 `request-codec-verification.json` 等报告属于旧实验；版本和范围以各报告及本页说明为准。
 所有测试素材、账号绑定、捕获、运行报告、app 和依赖均留在本机，Git 只保留源码和静态目录。
+
+`publish_image_moment(text, path, visibility=...)` 已接通原生 CDN 上传和 SNS 发布，并完成配图与评论实测回读；参见 [单图发布说明](native-sns-images.md)。

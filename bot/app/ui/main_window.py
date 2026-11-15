@@ -23,6 +23,7 @@ from .pages.models import ModelsPage
 from .pages.monitor import MonitorPage
 from .pages.personas import PersonasPage
 from .pages.settings import SettingsPage
+from .pages.moments import MomentsPage
 from .pages.stickers import StickersPage
 from .pages.targets import TargetsPage
 from .pages.training import TrainingPage
@@ -45,6 +46,7 @@ PAGE_CLASSES = {
     "models": ModelsPage,
     "logs": LogsPage,
     "settings": SettingsPage,
+    "moments": MomentsPage,
 }
 
 PAGE_CODES = {key: code for key, _label, _icon, code in NAV_ITEMS}

@@ -341,7 +341,7 @@ class NativeWeChatAdapter(BaseWeChatAdapter):
     def publish_moment(self,text,image_path=None,*,dry_run=False):
         if dry_run:
             draft=self._session.prepare_moment(text,visibility='public');return SendResult(True,'已生成原生草稿，未发布。',status='preview',metadata={k:v for k,v in draft.items() if k!='payload'})
-        if image_path and not hasattr(self._session,'publish_image_moment'):
+        if image_path and (not hasattr(self._session,'publish_image_moment') or not self._session.profile.get('nativeSnsUpload')):
             return SendResult(False,'朋友圈配图上传接口尚未接入，日记草稿已保留。',status='unsupported')
         result=(self._session.publish_image_moment(text,image_path,visibility='public') if image_path else
                 self._session.publish_moment(text,visibility='public'))

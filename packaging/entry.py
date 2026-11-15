@@ -72,6 +72,9 @@ if __name__=='__main__':
         import tkinter,frida,PIL,numpy,miniaudio,keyring,AppKit,zstandard
         from wechat_aumac.native.session import NativeSession
         from app.ui.main_window import MainWindow
+        from importlib.resources import files
+        for name in ['agent.js','database_agent.js','resource_agent.js','sns_upload_agent.js']:
+            assert files('wechat_aumac.native').joinpath(name).is_file(), 'Missing native resource: '+name
         assert (BUNDLE/'assets/app_icon.png').is_file()
         assert (BUNDLE/'installer_payload/native-profile.json').is_file()
         print(json.dumps({'standalone':True,'architecture':'arm64','dependencies':'ok','personal_data':False}));sys.exit(0)

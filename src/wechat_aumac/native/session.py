@@ -20,7 +20,7 @@ from .cards import enrich_message,parse_xml
 from .message_actions import (quote_request,parse_app_request,parse_app_response,validate_app_response,message_reference,revoke_request,parse_revoke_response,revoke_metadata)
 from .media import image_request, parse_image_request, parse_image_response, validate_image_response
 from .moments import (timeline_request, detail_request, parse_timeline_response, parse_detail_response,
-                      interaction_request,unlike_request,text_post_request,parse_objectop_response)
+                      interaction_request,unlike_request,text_post_request,image_post_request,parse_objectop_response)
 from .media_experimental import (voice_request,sticker_request,video_request,amr_duration_ms,
                                  parse_voice_response,parse_sticker_response,parse_video_response,
                                  observed_requests,confirmed_observations)
@@ -114,6 +114,7 @@ class NativeSession:
         self._own_user_id = None
         self.cleanup_errors = []
         self._database_reader = None
+        self._sns_upload_reader = None
         self._resource_reader = None
         self._database_lock = threading.RLock()
         self._rpc_lock = threading.RLock()
@@ -526,7 +527,7 @@ class NativeSession:
     def publish_moment(self,text: str,*,visibility: str,timeout: float=30) -> dict:
         """Experimental plain-text publishing; visibility is mandatory.
 
-        No Moments write has been server-tested by this project. This method
+        Text and single-image publishing have passed authorized server tests. This method
         requires moments_operations=['publish'] and an explicit caller action.
         """
         self._require_moment('publish',timeout)
@@ -546,6 +547,36 @@ class NativeSession:
         except (ValueError,UnicodeError,ET.ParseError) as exc:
             return {'status':'unconfirmed','task_id':result['task_id'],
                     'detail':f'{exc}; the post may exist; do not retry automatically','experimental':True}
+
+    def publish_image_moment(self,text: str,path: str|Path,*,visibility: str,timeout: float=40) -> dict:
+        """Upload a JPEG/PNG locally, then publish one image through native SNS APIs."""
+        self._require_moment('publish',timeout)
+        # Validate text/privacy before any upload or external effect.
+        own=self.identity()['user_id'];client=uuid.uuid4().hex;timestamp=int(time.time())
+        text_post_request(own,text,visibility=visibility,client_id=client,timestamp=timestamp)
+        with self._rpc_lock:
+            if self._sns_upload_reader is None:
+                from .sns_upload import NativeSnsUpload
+                self._sns_upload_reader=NativeSnsUpload(self)
+            media=self._sns_upload_reader.upload(path,timeout=timeout)
+            if media.get('status')!='acknowledged':return media
+            payload,xml=image_post_request(own,text,media,visibility=visibility,client_id=client,timestamp=timestamp)
+            result=self._moment_write('moment_post',payload,timeout=timeout)
+            if result['status']!='response_received':return {**result,'stage':'post','media_uploaded':True}
+            try:
+                decoded=parse_detail_response(result['bytes'])
+                if decoded['status']=='rejected':return {**decoded,'task_id':result['task_id'],'media_uploaded':True}
+                post=decoded['post'];root=ET.fromstring(post.get('description_xml',''))
+                items=root.findall('./ContentObject/mediaList/media')
+                if (post['owner_id']!=own or post['text']!=text or root.findtext('private')!=('1' if visibility=='private' else '0')
+                        or root.findtext('./ContentObject/contentStyle')!='1' or len(items)!=1
+                        or items[0].findtext('url')!=media['url'] or items[0].findtext('thumb')!=media['thumb']):
+                    raise ValueError('Published image post did not match its native upload')
+                return {**decoded,'task_id':result['task_id'],'visibility':visibility,'image_count':1,
+                        'media_uploaded':True,'source_sha256':media['source_sha256']}
+            except (ValueError,UnicodeError,ET.ParseError) as exc:
+                return {'status':'unconfirmed','task_id':result['task_id'],'stage':'post','media_uploaded':True,
+                        'detail':f'{exc}; the post may exist; do not retry automatically'}
 
     def _interact_moment(self,operation,post_id,text,*,nickname,timeout):
         self._require_moment(operation,timeout)
@@ -632,9 +663,13 @@ class NativeSession:
         if self._remember(message):self._enqueue({'event':'outgoing_message','message':message})
 
     def send_voice(self,receiver_id: str,path: str|Path,*,timeout: float=30) -> dict:
-        """Send pre-encoded AMR-NB (one chunk, at most 64 KiB / 60 seconds)."""
+        """Send Tencent SILK or legacy AMR-NB, at most 64 KiB / 60 seconds."""
         self._require_media('voice',timeout)
-        data=self._media_file(path,65536);duration=amr_duration_ms(data)
+        data=self._media_file(path,65536)
+        if data.startswith(b'#!AMR\n'):duration=amr_duration_ms(data)
+        else:
+            from .voice import duration_ms
+            duration=duration_ms(data)
         own=self.identity()['user_id'];created_at=int(time.time());client=f'aumac_{created_at}_{secrets.randbelow(0xffffffff)+1}'
         payload=voice_request(own,receiver_id,client,data,duration_ms=duration,timestamp=created_at)
         result=self._submit_media_request('voice',payload,timeout=timeout)
@@ -954,6 +989,9 @@ class NativeSession:
         with self._send_lock, self._rpc_lock, self._database_lock:
             try:
                 if self._session is not None and not self._detached:
+                    if self._sns_upload_reader:
+                        self._sns_upload_reader.close()
+                        self._sns_upload_reader = None
                     if self._resource_reader:
                         self._resource_reader.close()
                         self._resource_reader = None
