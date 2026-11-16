@@ -43,6 +43,7 @@ def main():
   incoming=IncomingMessage('room','甲','这张图是谁',chat_type='group',raw={'sender_username':'a'})
   old=[{'role':'user','sender':'甲','created_at':time.time(),'msg_type':'image','meta':{'image_path':str(tall),'sender_username':'a'}}]
   assert reply_image_paths(incoming,old)==[str(tall)]
+  assert reply_image_paths(IncomingMessage('room','甲','这是啥',chat_type='group',raw={'sender_username':'a'}),old)==[str(tall)]
   assert not reply_image_paths(IncomingMessage('room','乙','这张图是谁',chat_type='group',raw={'sender_username':'b'}),old)
   assert not reply_image_paths(IncomingMessage('room','甲','你好',chat_type='group',raw={'sender_username':'a'}),old)
   old.append({'role':'user','sender':'甲','created_at':time.time(),'msg_type':'image','meta':{'sender_username':'a'}})

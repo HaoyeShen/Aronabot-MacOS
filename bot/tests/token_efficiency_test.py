@@ -13,9 +13,18 @@ from app.memory import MemoryStore
 from app.evidence_text import evidence_excerpt
 from app.prompting import build_system_prompt,build_compact_system_prompt
 from app.defaults import ARONA_PERSONA,PLANA_PERSONA
+from app.prompting import stable_instruction,RUNTIME_MARKER
 
 
 def main():
+    first=build_system_prompt(ARONA_PERSONA,[],target_name='甲',recipient_name='甲',training_block='资料甲')
+    second=build_system_prompt(ARONA_PERSONA,[],target_name='乙',recipient_name='乙',training_block='资料乙')
+    protocol='固定工具协议'
+    left=stable_instruction(first,protocol);right=stable_instruction(second,protocol)
+    assert left.partition(RUNTIME_MARKER)[0]==right.partition(RUNTIME_MARKER)[0]
+    assert left.index(protocol)<left.index('资料甲')
+    assert '资料乙' not in left and '资料甲' not in right
+    assert stable_instruction('普通系统规则','追加规则')=='普通系统规则追加规则'
     runtime=AgentRuntime();requests=[]
     transcript=[{'role':'user' if i%2==0 else 'assistant','content':str(i)+'，完整聊天内容。'*25} for i in range(30)]
     client=SimpleNamespace(model='fixture',api_key='')

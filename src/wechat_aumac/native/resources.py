@@ -221,3 +221,22 @@ class NativeResources:
         from .wxgf import verify
         return verify(path,str(entry.get('md5') or '').lower(),
                       self.session.profile['nativeResources'].get('wxgfCodec') or {})
+
+    def download_emoji(self,entry,node,directory):
+        """A sync notification can arrive before WeChat populates its pack cache."""
+        try:return self.download_sticker(entry,directory)
+        except (ValueError,RuntimeError,OSError):pass
+        from urllib.parse import urlsplit,urlunsplit
+        digest=str(entry.get('md5') or '').lower()
+        if not re.fullmatch('[a-f0-9]{32}',digest):raise ValueError('Emoji has no exact digest')
+        url=node.get('cdnurl') or ''
+        parts=urlsplit(url)
+        if parts.scheme=='http':url=urlunsplit(parts._replace(scheme='https'))
+        if not url:raise RuntimeError('Full emoji is not cached and has no original CDN URL')
+        # Use WeChat's HTTPS function, never a thumbnail or an encrypted URL
+        # masquerading as decoded artwork. Digest validation is mandatory.
+        receipt=self.session.download_public_resource(url,timeout=15)
+        data=self._verified(Path(receipt['path']).read_bytes(),digest)
+        folder=Path(directory).resolve();folder.mkdir(parents=True,exist_ok=True)
+        destination=folder/(digest+'.image')
+        return self._write_artwork(data,digest,destination,'native-original-cdn')

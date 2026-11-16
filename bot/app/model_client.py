@@ -299,7 +299,8 @@ class ModelClient:
         if not self.model:
             raise ModelError("尚未选择模型")
         from .reasoning import instruction
-        system += instruction(self.effort)
+        from .prompting import stable_instruction
+        system = stable_instruction(system,instruction(self.effort))
         started = time.perf_counter()
         if self.provider == "ollama":
             log.info("本地模型请求 · %s · messages=%d · system=%d chars · num_ctx=%d · num_predict=%d · timeout=%ds",

@@ -920,7 +920,7 @@ class NativeSession:
             entry['locations'].extend(self._database().sticker_locations(entry['md5']))
         except Exception:
             pass
-        return self.download_sticker(entry,directory)
+        return self._resources().download_emoji(entry,node,directory)
 
 
 

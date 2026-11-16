@@ -24,6 +24,12 @@ SERIOUS_WORDS = (
     "suicide", "kill myself", "self harm", "emergency",
 )
 GROUP_PREFIX = re.compile(r"^\[[^\]]{1,60}\]\s*")
+RUNTIME_MARKER = '\n【本轮会话数据】\n'
+
+def stable_instruction(system, instruction):
+    """Keep invariant rules before changing facts for provider prefix caching."""
+    prefix, marker, runtime=system.partition(RUNTIME_MARKER)
+    return prefix+instruction+(marker+runtime if marker else '')
 
 def self_name_rule(name: str = "阿洛娜", persona: dict | None = None) -> str:
     name = str(name or "阿洛娜").strip() or "阿洛娜"
@@ -290,7 +296,7 @@ def _persona_block(persona: dict) -> str:
 
 def sticker_catalog(stickers: Iterable[dict]) -> str:
     lines = []
-    for index, sticker in enumerate(stickers, start=1):
+    for index, sticker in enumerate(sorted(stickers,key=lambda s:(str(s.get('name','')),str(s.get('id','')))), start=1):
         name = str(sticker.get("name", "")).strip()
         if not name:
             continue
@@ -396,6 +402,7 @@ def build_system_prompt(persona: dict, stickers: list[dict], *,
     sections.append(self_name_rule(persona.get("name", "阿洛娜"), persona))
     sections.append(natural_dialogue_rule(persona))
     sections.append(CAT_SPEECH_RULE)
+    sections.append(RUNTIME_MARKER)
     if training_block:
         sections.append(training_block)
     sections.append(party_rule + f"当前对话：{target_name or '未知'}（{chat_kind}）。现在是 {now:%Y-%m-%d %H:%M}，星期{weekday}。")
@@ -452,7 +459,7 @@ def build_compact_system_prompt(persona: dict, stickers: list[dict], *,
     if stickers_enabled and stickers:
         catalog = "、".join(
             f"{s.get('name')}({s.get('emotion', '')}；{'/'.join(str(t) for t in s.get('tags', [])[:3])})"
-            for s in stickers[:20]
+            for s in sorted(stickers,key=lambda s:(str(s.get('name','')),str(s.get('id',''))))[:20]
         )
         lines.append("可用表情包：" + catalog)
         lines.append(
@@ -464,6 +471,7 @@ def build_compact_system_prompt(persona: dict, stickers: list[dict], *,
     lines.append(self_name_rule(persona.get("name", "阿洛娜"), persona))
     lines.append(natural_dialogue_rule(persona))
     lines.append(CAT_SPEECH_RULE)
+    lines.append(RUNTIME_MARKER)
     lines.append(party_line)
     if training_block:
         lines.append(training_block)

@@ -1243,6 +1243,7 @@ class BotService:
                            else float(incoming.received_at or 0)),
                 meta={'image_path': incoming.image_path,
                       'sender_username': (incoming.raw or {}).get('sender_username') or (incoming.raw or {}).get('sender', ''),
+                      'native_message_id': (incoming.raw or {}).get('message_id',''),
                       'attachment_path': (incoming.raw or {}).get('_attachment_path',''),
                       'admin_private': bool(private_admin_identity(self, incoming) and (
                           action_requested(incoming.content) or self._admin_key(incoming) in self._admin_sessions)),
@@ -2237,8 +2238,25 @@ class BotService:
         info = {'searched': False, 'sources': [], 'learned': 0}
         persona = persona or self.personas.get(self.config.data.get('active_persona_id'))
         RUNTIME.set_persona(self._persona_key(persona))
-        from .multimodal import reply_image_paths
-        image_paths = reply_image_paths(incoming, self.memory.recent(incoming.chat, 12),
+        from .multimodal import reply_image_paths, image_reference
+        # Sync notifications may precede media caching. Recover only the exact
+        # latest attachment of this sender; never substitute another picture.
+        recent_media=self.memory.recent(incoming.chat,12)
+        if image_reference(incoming.content) and callable(getattr(self._adapter,'recover_media',None)):
+            for row in reversed(recent_media):
+                meta=row.get('meta') or {}
+                if row.get('role')!='user' or meta.get('manual'):continue
+                if time.time()-float(row.get('created_at') or 0)>300:break
+                sender=(incoming.raw or {}).get('sender_username') or (incoming.raw or {}).get('sender')
+                if incoming.is_group and ((sender and meta.get('sender_username')!=sender) or (not sender and row.get('sender')!=incoming.sender)):continue
+                if row.get('msg_type') not in ('image','emotion'):continue
+                if not meta.get('image_path') and meta.get('native_message_id'):
+                    try:
+                        recovered=self._adapter.recover_media(incoming.chat,meta['native_message_id'])
+                        if recovered:meta['image_path']=recovered;row['meta']=meta
+                    except Exception as exc:log.warning('原生附件追问恢复失败 · %s',type(exc).__name__)
+                break
+        image_paths = reply_image_paths(incoming, recent_media,
             max_age=max(1, int(self.config.bot.get('followup_timeout_minutes', 5))) * 60)
         if any(image_paths):
             if profile.get('supports_vision'):

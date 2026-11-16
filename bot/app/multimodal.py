@@ -13,7 +13,7 @@ def reply_image_paths(incoming, history, *, max_age=300):
     direct = [incoming.image_path, *(incoming.raw or {}).get('_model_images', [])]
     if any(direct) or incoming.msg_type in ('image', 'emotion', 'video', 'file'):
         return [str(p) for p in direct if p]
-    if not re.search(r'图|照片|表情|画面|附件|第一个|第二个|第三个|上面|刚才|这个|那个|这张|那张|颜色|里面|是谁|看到了什么', incoming.content or ''):
+    if not image_reference(incoming.content):
         return []
     result = []
     for row in reversed(history):
@@ -34,6 +34,10 @@ def reply_image_paths(incoming, history, *, max_age=300):
         elif row.get('msg_type') in ('image', 'emotion'):
             break
     return list(dict.fromkeys(result))[:3]
+
+
+def image_reference(text):
+    return bool(re.search(r'图|照片|表情|画面|附件|第一个|第二个|第三个|上面|刚才|这个|那个|这张|那张|颜色|里面|是谁|看到了什么|这(?:是)?(?:啥|什么)|那(?:是)?(?:啥|什么)',text or ''))
 
 
 def _samples(path):

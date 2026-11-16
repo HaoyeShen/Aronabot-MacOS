@@ -161,7 +161,8 @@ class AgentRunner:
                 return run
             final_only = index == max_steps
             instruction = protocol + ('\n工具轮次已用完；只能给出最终答复，资料不足要如实说明。' if final_only else '')
-            operation, result = _bounded(lambda: call(history, system + instruction, remaining), deadline, cancelled)
+            from .prompting import stable_instruction
+            operation, result = _bounded(lambda: call(history, stable_instruction(system,instruction), remaining), deadline, cancelled)
             if operation != 'busy':
                 run.model_calls += 1
             if operation == 'error':

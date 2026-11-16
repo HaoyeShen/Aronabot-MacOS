@@ -345,6 +345,14 @@ class NativeWeChatAdapter(BaseWeChatAdapter):
         receipt=self._session.download_public_resource(card.media_url,timeout=25)
         from .incoming_video import read_video
         return read_video(receipt['path'],DATA/'images/incoming_video')
+
+    def recover_media(self,chat,message_id):
+        with self._transport_lock:
+            user=self.chat_identity(chat)
+            for message in self._session.get_history(user,limit=200):
+                if str(message.get('message_id'))==str(message_id) and message.get('message_type') in (3,47):
+                    return str(self._session.download_media(message,DATA/'images/incoming'))
+        return ''
     @fresh_send
     def send_native_sticker(self,chat,entry,*,allowed=lambda:True):
         if not allowed():return SendResult(False,'任务已取消',status='cancelled')
