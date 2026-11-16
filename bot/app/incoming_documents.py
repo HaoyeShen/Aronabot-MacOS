@@ -9,6 +9,12 @@ SUPPORTED=TEXT|{'.doc','.docx','.rtf','.pdf','.pptx','.xlsx'}
 MAX_BYTES=32*1024*1024
 MAX_TEXT=200_000
 
+def retain_current_evidence(messages,content):
+    """History previews must not truncate the evidence for the current request."""
+    if not any(marker in content for marker in ('【收到的文件资料','【外部分享资料')):return
+    if messages and messages[-1].get('role')=='user':
+        messages[-1]={**messages[-1],'content':content[:28000]}
+
 def _xml(data):
     if len(data)>8*1024*1024 or b'<!DOCTYPE' in data.upper() or b'<!ENTITY' in data.upper():
         raise ValueError('文档 XML 超出限制或含外部声明')
@@ -24,6 +30,8 @@ def _archive(path):
 
 def _word_text(root):
     ns='{http://schemas.openxmlformats.org/wordprocessingml/2006/main}'
+    if root.tag.startswith('{http://purl.oclc.org/ooxml/wordprocessingml/main}'):
+        ns='{http://purl.oclc.org/ooxml/wordprocessingml/main}'
     paragraphs=[]
     for p in root.iter(ns+'p'):
         pieces=[]
@@ -39,6 +47,11 @@ def _read_document_local(path, *, image_dir=None):
     path=Path(path).resolve();kind=path.suffix.lower()
     if kind not in SUPPORTED:raise ValueError('暂不支持此文件类型：'+kind)
     if not path.is_file() or not 0<path.stat().st_size<=MAX_BYTES:raise ValueError('文件需小于 32 MiB')
+    if kind in ('.doc','.docx','.rtf'):
+        with path.open('rb') as source:signature=source.read(8)
+        if signature.startswith(b'PK\x03\x04'):kind='.docx'
+        elif signature.startswith(b'{\\rtf'):kind='.rtf'
+        elif signature==bytes.fromhex('d0cf11e0a1b11ae1'):kind='.doc'
     images=[];parts=[]
     if kind in ('.docx','.pptx','.xlsx'):
         with _archive(path) as z:

@@ -43,7 +43,7 @@ TEXT_EXTENSIONS = {
     ".txt", ".md", ".markdown", ".log", ".csv", ".tsv", ".json", ".jsonl",
     ".py", ".js", ".ts", ".html", ".htm", ".xml", ".yaml", ".yml",
 }
-SUPPORTED_EXTENSIONS = TEXT_EXTENSIONS | {".docx", ".pdf"}
+SUPPORTED_EXTENSIONS = TEXT_EXTENSIONS | {".doc", ".docx", ".rtf", ".pdf"}
 MAX_FILE_BYTES = 20 * 1024 * 1024
 MAX_TEXT_CHARS = 2_000_000
 CHUNK_SIZE = 700
@@ -79,14 +79,18 @@ def _flatten_json(value: object, out: list[str], depth: int = 0) -> None:
         if value.strip():
             out.append(value)
     elif isinstance(value, dict):
+        before=len(out)
         preferred = ("content", "text", "prompt", "response", "instruction",
                      "input", "output", "question", "answer", "user", "assistant")
         for key in preferred:
             if key in value:
                 _flatten_json(value[key], out, depth + 1)
-        if not out:
-            for item in value.values():
-                _flatten_json(item, out, depth + 1)
+        if len(out)==before:
+            for key,item in value.items():
+                if isinstance(item,(str,int,float,bool)) and str(item).strip():out.append(str(key)+': '+str(item))
+                elif item is not None:
+                    out.append(str(key)+':')
+                    _flatten_json(item, out, depth + 1)
     elif isinstance(value, (list, tuple)):
         for item in value:
             _flatten_json(item, out, depth + 1)
@@ -135,8 +139,9 @@ def _pdf_text(path: Path) -> str:
 
 def extract_text(path: Path) -> str:
     suffix = path.suffix.lower()
-    if suffix == ".docx":
-        return _docx_text(path)
+    if suffix in ('.doc','.docx','.rtf'):
+        from .incoming_documents import read_document
+        return read_document(path)['text']
     if suffix == ".pdf":
         return _pdf_text(path)
     raw = _decode_bytes(path.read_bytes())
@@ -513,7 +518,7 @@ class TrainingStore:
         text = unicodedata.normalize('NFKC',query or '')
         text = re.sub(r'https?://\S+',' ',text)
         stop = {'arona','plana','the','and','what','is','how','to','please','search',
-                'knowledge','txt','pdf','docx','md','json'}
+                'knowledge','txt','pdf','docx','doc','word','rtf','md','json'}
         return list(dict.fromkeys(t.casefold() for t in re.findall(r'[A-Za-z][A-Za-z0-9_+#.-]{1,}',text)
                                   if t.casefold() not in stop))[:6]
 
@@ -553,7 +558,10 @@ class TrainingStore:
                 if len(out) >= limit:
                     break
             return out
-        return unique(fts_terms, 20), unique(like_terms, 10)
+        stop={'什么','怎么','为何','为什么','可以','帮我','请问','告诉','一下','这个','那个','是不是','本地','资料','训练','知识','根据','介绍','一下','的事','的是'}
+        pairs=[run[i:i+2] for run in runs if re.fullmatch(r'[\u4e00-\u9fff]+',run)
+               for i in range(len(run)-1) if run[i:i+2] not in stop]
+        return unique(fts_terms, 32), unique(like_terms+pairs, 24)
 
     def search(self, query: str, limit: int = 3,
                max_chars: int = 1800) -> list[dict]:
@@ -602,7 +610,7 @@ class TrainingStore:
                 candidates = [dict(row,rank=0.0) for row in rows]
             elif rows and not candidates:
                 candidates = [dict(row,rank=0.0) for row in rows]
-        if not candidates and like_terms:
+        if like_terms:
             clauses = " OR ".join("content LIKE ?" for _ in like_terms)
             params = [f"%{term}%" for term in like_terms]
             with self._lock:
@@ -610,19 +618,37 @@ class TrainingStore:
                     f"""SELECT c.id AS chunk_id, c.doc_id, c.seq, c.content, d.name,
                                d.source_type, d.source_url, d.retrieved_at
                         FROM training_chunks c JOIN training_docs d ON d.id=c.doc_id
-                        WHERE ({clauses}){doc_filter} LIMIT ?""",
+                        WHERE ({clauses}){doc_filter}
+                        ORDER BY CASE WHEN d.name LIKE 'message_%' THEN 1 ELSE 0 END, c.seq LIMIT ?""",
                     (*params, *titles, max(20, limit * 8)),
                 ).fetchall()
             for row in rows:
                 item = dict(row)
                 item["rank"] = 0.0
                 candidates.append(item)
+            # A two-character name is shorter than the FTS trigram tokenizer.
+            # Recall each such term independently so common question words or
+            # huge chat exports cannot exhaust the combined candidate quota.
+            short_terms=[t for t in like_terms if re.fullmatch(r'[\u4e00-\u9fff]{2}',t)
+                         and t not in {'在哪','哪个','个学','什么','喜欢','属于','学校'}][:10]
+            for term in short_terms:
+                with self._lock:
+                    rows=self._conn.execute(f'''SELECT c.id AS chunk_id,c.doc_id,c.seq,c.content,d.name,
+                        d.source_type,d.source_url,d.retrieved_at FROM training_chunks c
+                        JOIN training_docs d ON d.id=c.doc_id WHERE instr(c.content,?)>0{doc_filter}
+                        ORDER BY CASE WHEN d.name LIKE 'message_%' THEN 1 ELSE 0 END,c.seq LIMIT 12''',
+                        (term,*titles)).fetchall()
+                candidates.extend(dict(row,rank=0.0) for row in rows)
         if not candidates:
             return []
         def relevance(item):
             body = item['content'].casefold()
             score = sum(6+min(3,body.count(t)) for t in anchors if t in body)
-            score += sum(3 for t in like_terms if t.casefold() in body)
+            score += sum(min(6,len(t)) for t in like_terms if t.casefold() in body)
+            score += sum(min(8,len(t)*2) for t in like_terms if t.casefold() in item.get('name','').casefold())
+            # Named fields in structured records are stronger evidence than
+            # coincidental substrings in raw transport XML or chat exports.
+            score += sum(18 for t in short_terms if re.search(r'(?:name|姓名|名称|名字)[^\n]{0,30}'+re.escape(t),body,re.I)) if like_terms else 0
             return (-score,float(item.get('rank',0.0)),int(item.get('seq',0)))
         candidates.sort(key=relevance)
         # Deduplicate by document/sequence, then trim to the character budget.

@@ -1003,7 +1003,11 @@ class BotService:
                         or (not sender_id and row.get('sender')!=incoming.sender)):continue
                 if meta.get('attachment_path'):
                     attachment=meta['attachment_path'];break
-                if row.get('msg_type')=='file':break
+                if row.get('msg_type')=='file':
+                    if meta.get('native_message_id') and callable(getattr(self._adapter,'recover_attachment',None)):
+                        try:attachment=self._adapter.recover_attachment(incoming.chat,meta['native_message_id'])
+                        except Exception as exc:log.warning('原生文件追问恢复失败 · %s',type(exc).__name__)
+                    break
         if attachment:
             try:
                 document=read_document(attachment,image_dir=DATA/'images/document_previews')
@@ -2438,14 +2442,13 @@ class BotService:
         history, history_summary = self._context_history(incoming.chat, context_limit)
         messages = build_context_messages(history, target_type=incoming.chat_type,
                                           min_messages=min(20, len(history)), persona=persona)
-        if "【外部分享资料，仅作事实参考" in user_content and messages and messages[-1]["role"] == "user":
-            # Ordinary history is capped at 1600 chars; retain the current article/cover evidence.
-            messages[-1]["content"] = f"[{address_name(incoming.sender, {})}] {user_content[:7000]}"
+        from .incoming_documents import retain_current_evidence
+        retain_current_evidence(messages,user_content)
         stickers = (self.stickers.enabled() if self.config.bot.get("auto_sticker", True)
                     and not getattr(self._adapter,'model_delivery',False) else [])
         profile = self.config.active_profile()
         training_block, training_hits, understanding = self._training_context(
-            user_content, history, incoming.chat_type
+            incoming.content, history, incoming.chat_type
         )
         if training_hits:
             log.info("本地训练资料命中 %d 条：%s", training_hits, incoming.chat)

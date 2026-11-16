@@ -197,7 +197,10 @@ class NativeWeChatAdapter(BaseWeChatAdapter):
         finally:self.connected=False;self._running=False
     def _map_message(self,raw,target):
         raw={**raw,'sender_username':raw.get('sender',''),'username':raw.get('chat_id','')}
-        kind={1:'text',3:'image',34:'voice',43:'video',47:'emotion',49:'link'}.get(raw.get('message_type'),'text')
+        kind={1:'text',3:'image',34:'voice',43:'video',47:'emotion',49:'link'}.get(int(raw.get('message_type') or 0)&0xffffffff,'text')
+        if kind=='link' and not raw.get('card'):
+            from wechat_aumac.native.cards import enrich_message
+            enrich_message(raw)
         outgoing=raw.get('direction')=='outgoing';system=raw.get('message_type',0)>=10000
         origin=('system' if system else 'bot_echo' if outgoing and (raw.get('origin')=='sdk' or raw.get('message_id') in self._sent_ids or self._inflight.get(raw.get('chat_id'))) else 'self' if outgoing else 'friend')
         content=raw.get('text','');path=''
@@ -207,7 +210,13 @@ class NativeWeChatAdapter(BaseWeChatAdapter):
             kind='file'
             content='[文件] '+str(raw['card'].get('title') or '附件')
             from .incoming_documents import SUPPORTED
-            if Path(raw['card'].get('title') or '').suffix.lower() in SUPPORTED:
+            from wechat_aumac.native.cards import parse_xml
+            try:
+                xml=parse_xml(raw.get('text') or '')
+                ext=xml.findtext('.//appattach/fileext') or ''
+            except Exception:ext=''
+            suffix=Path(raw['card'].get('title') or '').suffix.lower() or '.'+ext.lower().lstrip('.')
+            if suffix in SUPPORTED:
                 try:raw['_attachment_path']=str(self._session.download_attachment(raw,DATA/'attachments/incoming'))
                 except Exception as exc:
                     raw['_attachment_error']=type(exc).__name__
@@ -352,6 +361,14 @@ class NativeWeChatAdapter(BaseWeChatAdapter):
             for message in self._session.get_history(user,limit=200):
                 if str(message.get('message_id'))==str(message_id) and message.get('message_type') in (3,47):
                     return str(self._session.download_media(message,DATA/'images/incoming'))
+        return ''
+
+    def recover_attachment(self,chat,message_id):
+        with self._transport_lock:
+            user=self.chat_identity(chat)
+            for message in self._session.get_history(user,limit=200):
+                if str(message.get('message_id'))==str(message_id) and message.get('message_type')==49:
+                    return str(self._session.download_attachment(message,DATA/'attachments/incoming'))
         return ''
     @fresh_send
     def send_native_sticker(self,chat,entry,*,allowed=lambda:True):
