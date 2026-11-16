@@ -14,7 +14,7 @@ python3 -m venv .venv-bot
 .venv-bot/bin/python bot/run.py
 ```
 
-安装包完成配置后，可从桌面快捷方式启动；首次使用需要配置自己的模型 API 和监听对象。窗口关闭按钮会隐藏窗口并继续运行；菜单栏图标提供显示窗口、启动机器人、停止机器人、退出软件。再次启动快捷方式会唤回已运行的窗口。
+本机已配置 Python 环境、DeepSeek 模型和桌面快捷方式，双击桌面“什亭之匣.app”即可启动。窗口关闭按钮会隐藏窗口并继续运行；菜单栏图标提供显示窗口、启动机器人、停止机器人、退出软件。再次启动快捷方式会唤回已运行的窗口。
 
 命令行也支持：
 
@@ -41,3 +41,7 @@ Mac 版保留首页动画、摸头互动、14 个界面页面、每聊天独立 
 ## 许可
 
 代码与原项目许可及角色图片的使用说明均保留，见 [LICENSE](LICENSE)、[WecVoice 来源许可](LICENSE.WecVoice-auto) 和 [UPSTREAM](UPSTREAM.md)。原文档中的 `.bat`、Windows UIA、DPAPI、VB-CABLE 与 Windows 安装步骤仅作为上游历史参考，Mac 版不使用这些微信控制方式。
+
+## 后台识图与附件理解
+
+普通图片、表情、txt/md、Word、PDF、PPTX、XLSX 等内容已接入原生附件读取与本地解析。可读取的视频号媒体使用实际抽帧和音轨转写；受限资源保留明确的不可读状态。详见 [读取能力与验证边界](../docs/native-incoming-media.md)。

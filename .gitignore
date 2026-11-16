@@ -50,3 +50,9 @@ packaging/.build/
 packaging/payload/*.dylib
 packaging/payload/sdk/
 packaging/payload/character-voice.tar.gz
+
+research/incoming-image-inspection/
+research/inspect_incoming_images.py
+research/inspect_image_records.py
+research/image_observer_controller.py
+research/native_media_controller.py

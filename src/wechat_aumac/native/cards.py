@@ -12,6 +12,7 @@ URL = re.compile(r"(?:https?|weixin|wxwork|wxfile)://[^\s<>\"']+", re.I)
 def parse_xml(value: str) -> ET.Element:
     if not isinstance(value, str) or len(value.encode('utf-8')) > MAX_XML_BYTES:
         raise ValueError('Message XML exceeds 1 MiB')
+    value=value.strip()
     if '<!DOCTYPE' in value.upper() or '<!ENTITY' in value.upper():
         raise ValueError('Message XML declarations are not allowed')
     try:
@@ -19,7 +20,8 @@ def parse_xml(value: str) -> ET.Element:
     except ET.ParseError:
         # The native AppMsg.Content is often a sequence of XML fragments
         # (appmsg + fromusername + scene), rather than a single document.
-        root = ET.fromstring('<message-fragments>' + value + '</message-fragments>')
+        fragment=re.sub(r'^<\?xml[^?]*\?>\s*','',value,count=1,flags=re.I)
+        root = ET.fromstring('<message-fragments>' + fragment + '</message-fragments>')
     stack = [(root, 0)]; count = 0
     while stack:
         node, depth = stack.pop(); count += 1

@@ -73,7 +73,7 @@ if __name__=='__main__':
         from wechat_aumac.native.session import NativeSession
         from app.ui.main_window import MainWindow
         from importlib.resources import files
-        for name in ['agent.js','database_agent.js','resource_agent.js','sns_upload_agent.js']:
+        for name in ['agent.js','database_agent.js','resource_agent.js','sns_upload_agent.js','cdn_download_agent.js']:
             assert files('wechat_aumac.native').joinpath(name).is_file(), 'Missing native resource: '+name
         assert (BUNDLE/'assets/app_icon.png').is_file()
         assert (BUNDLE/'installer_payload/native-profile.json').is_file()
@@ -81,6 +81,12 @@ if __name__=='__main__':
     if '--wxgf-worker' in sys.argv:
         from wechat_aumac.native.wxgf import _worker
         print(json.dumps(_worker(json.loads(sys.stdin.read()))));sys.exit(0)
+    if '--incoming-document-worker' in sys.argv:
+        from app.incoming_documents import worker_main
+        worker_main();sys.exit(0)
+    if '--incoming-video-worker' in sys.argv:
+        from app.incoming_video import _worker
+        print(json.dumps(_worker(json.load(sys.stdin))));sys.exit(0)
     if '--web-render-worker' in sys.argv:
         from app.web_media import render_worker
         render_worker(sys.argv[-1]);sys.exit(0)

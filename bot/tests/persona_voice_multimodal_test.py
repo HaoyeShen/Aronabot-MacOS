@@ -47,7 +47,7 @@ def main():
             run = AgentRunner().run(call, messages, '结合图片回答。', [AgentTool('knowledge', 'query', '本地资料', lambda q, t: '蓝色')])
             assert run.status == 'completed' and len(seen) == 2 and seen[0] == seen[1]
             if provider == 'openai':
-                assert seen[0]['content'][1]['image_url']['url'].startswith('data:image/jpeg;base64,')
+                assert seen[0]['content'][1]['image_url']['url'].startswith('data:image/png;base64,')
             else:
                 assert seen[0]['images'] and seen[0]['content'] == '看这张图。'
         assert attach_images([{'role': 'user', 'content': '图'}], [root/'missing.png'], {'provider':'openai'}) == 0

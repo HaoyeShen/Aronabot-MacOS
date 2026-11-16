@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import base64
 import io
+import http.client
 import fnmatch
 import ipaddress
 import json
@@ -273,6 +274,8 @@ class ModelClient:
         except urllib.error.URLError as exc:
             reason = getattr(exc, "reason", exc)
             raise ModelError("无法连接模型服务，请检查服务地址与网络。", str(reason)) from exc
+        except (http.client.HTTPException, ConnectionError) as exc:
+            raise ModelError('模型连接中断，请稍后重试。','Connection '+type(exc).__name__) from exc
         except (json.JSONDecodeError, ssl.SSLError) as exc:
             raise ModelError("模型服务返回了无法解析的数据。", str(exc)) from exc
 
@@ -469,6 +472,26 @@ class ModelClient:
             "text": " · ".join(parts),
             "note": f"USD 按 1 USD = {USD_CNY_RATE:.2f} CNY 换算",
         }
+
+    def transcribe_audio(self,path):
+        """DeepSeek's standalone ASR; reply voice synthesis remains local."""
+        import uuid
+        from pathlib import Path
+        if urllib.parse.urlsplit(self.base_url).hostname!='api.deepseek.com':
+            raise ModelError('当前提供方未配置音轨转写接口')
+        data=Path(path).read_bytes()
+        if not 0<len(data)<=8*1024*1024 or not data.startswith(b'RIFF'):raise ModelError('音轨格式或大小不受支持')
+        boundary='wemac_'+uuid.uuid4().hex
+        body=(f'--{boundary}\r\nContent-Disposition: form-data; name="file"; filename="audio.wav"\r\nContent-Type: audio/wav\r\n\r\n'.encode()+data+f'\r\n--{boundary}--\r\n'.encode())
+        request=urllib.request.Request('https://api.deepseek.com/v1/tools/asr',data=body,headers={
+            'Authorization':'Bearer '+self.api_key,'Content-Type':'multipart/form-data; boundary='+boundary},method='POST')
+        try:
+            with self._opener().open(request,timeout=min(self.timeout,60)) as response:
+                value=json.loads(response.read(1024*1024))
+        except (OSError,ValueError) as exc:raise ModelError('视频音轨转写失败',type(exc).__name__) from exc
+        text=value.get('text')
+        if not isinstance(text,str):raise ModelError('视频音轨没有返回有效转写')
+        return text[:50000]
 
     @audited('图片理解')
     def describe_image(self, path, prompt: str = "", timeout: int = 90) -> LLMResult:

@@ -485,6 +485,18 @@ def build_context_messages(history: list[dict], *,
             # Older versions stored the raw emoji XML, including temporary
             # CDN authentication. Keep the conversation turn without tokens.
             content='[微信表情包：此前收到的表情，画面以实际附图为准]'
+        if '<img ' in content or '<img>' in content:
+            content='[此前收到一张图片，内容以本轮实际附图为准]'
+        if '<appattach' in content and '<appmsg' in content:
+            try:
+                from wechat_aumac.native.cards import parse_xml
+                root=parse_xml(content[content.find('<'):])
+                app=root if root.tag=='appmsg' else root.find('.//appmsg')
+                if app is not None and app.findtext('type')=='6':content='[此前收到文件] '+(app.findtext('title') or '附件')[:180]
+            except Exception:content='[此前收到文件卡片，正文未读取]'
+        if '<appmsg' in content:
+            from .link_reader import safe_card_text
+            content=safe_card_text(content)
         if not content:
             continue
         if role == "user":

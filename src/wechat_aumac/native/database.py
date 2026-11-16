@@ -110,6 +110,29 @@ class NativeDatabase:
         return [{'user_id':r['username'],'unread':int(r.get('unread_count') or 0),'timestamp':int(r.get('last_timestamp') or 0),
                  'last_sender':r.get('last_msg_sender'),'last_sender_name':r.get('last_sender_display_name')} for r in rows]
 
+    def message_resources(self, message):
+        """Resolve one exact server message; never search by attachment name."""
+        server = str(message.get('message_id') or '')
+        chat = str(message.get('chat_id') or '')
+        if not server.isdecimal() or not re.fullmatch(r'[A-Za-z0-9_.@-]{1,128}', chat):
+            raise ValueError('Attachment needs an exact server message and chat ID')
+        rows = self.read('message_resource.db', 'MessageResourceInfo',
+            ['message_id', 'chat_id', 'message_local_id', 'message_svr_id', 'message_local_type',
+             {'name':'packed_info', 'encoding':'hex'}],
+            filters=[{'column':'message_svr_id', 'value':server}], limit=2)
+        if len(rows) != 1:
+            raise RuntimeError('Native attachment resource record is not ready or ambiguous')
+        row = rows[0]
+        # The resource identity is independently checked against its chat map.
+        names = self.read('message_resource.db', 'ChatName2Id', ['rowid', 'user_name'],
+            filters=[{'column':'rowid', 'value':row['chat_id']}], limit=2)
+        if len(names) != 1 or names[0]['user_name'] != chat:
+            raise ValueError('Attachment resource belongs to another chat')
+        details = self.read('message_resource.db', 'MessageResourceDetail',
+            ['resource_id','message_id','type','size','status','data_index',{'name':'packed_info','encoding':'hex'}],
+            filters=[{'column':'message_id','value':row['message_id']}], limit=30)
+        return {'message':row, 'resources':details}
+
     def all_rows(self,database,table,columns,*,filters=(),order=()):
         result=[]
         for offset in range(0,100000,1000):
@@ -151,3 +174,10 @@ class NativeDatabase:
                 items.append({'md5':digest,'name':names.get(digest) or '未命名动画表情','locations':[location]})
             pages.append({'id':identity,'name':package['package_name_'] or identity,'items':items})
         return {'complete':True,'pages':pages,'unavailable':unsupported}
+
+    def sticker_locations(self,digest):
+        if not re.fullmatch('[a-f0-9]{32}',digest or ''):raise ValueError('Invalid sticker MD5')
+        rows=self.read('emoticon.db','kStoreEmoticonFilesTable',
+            ['package_id_','emoticon_offset_','emoticon_size_'],
+            filters=[{'column':'md5_','value':digest}],limit=10)
+        return [{'page':r['package_id_'],'offset':int(r['emoticon_offset_'] or 0),'size':int(r['emoticon_size_'] or 0)} for r in rows]

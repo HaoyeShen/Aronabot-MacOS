@@ -110,6 +110,9 @@ def install(source,destination,assistant,payload,data_dir,progress=lambda n,s:No
         sns_helper=target/'Contents/Frameworks/libwemac_sns_upload.dylib'
         shutil.copy2(payload/sns_helper.name,sns_helper)
         run(['/usr/bin/codesign','--force','--sign','-','--timestamp=none',sns_helper])
+        cdn_helper=target/'Contents/Frameworks/libwemac_cdn_download.dylib'
+        shutil.copy2(payload/cdn_helper.name,cdn_helper)
+        run(['/usr/bin/codesign','--force','--sign','-','--timestamp=none',cdn_helper])
         db_helper=target/'Contents/Frameworks/native-db-gate.dylib'
         shutil.copy2(payload/db_helper.name,db_helper)
         run(['/usr/bin/codesign','--force','--sign','-','--timestamp=none',db_helper])
@@ -144,6 +147,8 @@ def install(source,destination,assistant,payload,data_dir,progress=lambda n,s:No
         profile['completionHelper']={'path':str(destination/target.name/'Contents/Frameworks'/helper.name),'sha256':digest(helper)}
         profile['nativeSnsUpload']['bridge']={'path':str(destination/target.name/'Contents/Frameworks'/sns_helper.name),'sha256':digest(sns_helper)}
         profile['nativeSnsUpload']['cacheRoot']=str(Path.home()/'Library/Containers'/NEW_ID/'Data/Library/Caches/Wemac-auto/SNS')
+        profile['nativeCdnDownload']['bridge']={'path':str(destination/target.name/'Contents/Frameworks'/cdn_helper.name),'sha256':digest(cdn_helper)}
+        profile['nativeCdnDownload']['cacheRoot']=str(Path.home()/'Library/Containers'/NEW_ID/'Data/Library/Caches/Wemac-auto/Downloads')
         profile['nativeDatabase']['bridge']={'path':str(destination/target.name/'Contents/Frameworks'/db_helper.name),'sha256':digest(db_helper)}
         codec=profile['nativeResources']['wxgfCodec'];codec_name=Path(codec['path']).name
         selected=select_codec(target,codec_name)

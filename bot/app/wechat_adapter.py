@@ -203,9 +203,25 @@ class NativeWeChatAdapter(BaseWeChatAdapter):
         content=raw.get('text','');path=''
         if kind=='link' and raw.get('card',{}).get('subtype')=='57':
             content=raw['card'].get('title') or content;kind='text'
+        if kind=='link' and raw.get('card',{}).get('subtype')=='6':
+            kind='file'
+            content='[文件] '+str(raw['card'].get('title') or '附件')
+            from .incoming_documents import SUPPORTED
+            if Path(raw['card'].get('title') or '').suffix.lower() in SUPPORTED:
+                try:raw['_attachment_path']=str(self._session.download_attachment(raw,DATA/'attachments/incoming'))
+                except Exception as exc:
+                    raw['_attachment_error']=type(exc).__name__
+                    log.warning('原生附件下载暂不可用 · %s',type(exc).__name__)
         if kind in ('image','emotion') and hasattr(self._session,'download_media'):
             try:path=str(self._session.download_media(raw,DATA/'images/incoming'))
-            except Exception:log.exception('原生媒体暂不可读取')
+            except Exception as exc:
+                raw['_media_error']=type(exc).__name__
+                log.warning('原生媒体暂不可读取 · %s',type(exc).__name__)
+            if kind=='image':content='[图片]'
+            else:
+                from .wechat_emojis import emoji_node
+                node=emoji_node(raw.get('text',''))
+                content='[微信表情包'+('：'+str(node.get('caption') or '')[:120] if node is not None and node.get('caption') else '')+']'
         mentioned=False
         try:
             from wechat_aumac.native.cards import parse_xml
@@ -309,6 +325,26 @@ class NativeWeChatAdapter(BaseWeChatAdapter):
             from .native_stickers import NativeStickers
             self._native_stickers=NativeStickers(self._session)
         return self._native_stickers
+
+    def fetch_public(self,url,*,image=False,timeout=15):
+        """Read a card/article resource through WeChat, with no browser/UI."""
+        receipt=self._session.download_public_resource(url,timeout=timeout)
+        data=Path(receipt['path']).read_bytes()
+        if len(data)>(4_000_000 if image else 3_000_000):raise ValueError('分享资源过大')
+        if image:
+            from PIL import Image
+            with Image.open(receipt['path']) as im:im.verify()
+            return data,'utf-8'
+        if b'\0' in data[:1024]:raise ValueError('分享资源不是网页或纯文本')
+        match=re.search(rb'charset\s*=\s*[\"\x27]?([A-Za-z0-9_-]+)',data[:8192],re.I)
+        encoding=match.group(1).decode('ascii') if match else 'utf-8'
+        return data,encoding
+
+    def read_shared_video(self,card):
+        if not card.media_url:raise ValueError('视频号卡片没有可读取的媒体地址')
+        receipt=self._session.download_public_resource(card.media_url,timeout=25)
+        from .incoming_video import read_video
+        return read_video(receipt['path'],DATA/'images/incoming_video')
     @fresh_send
     def send_native_sticker(self,chat,entry,*,allowed=lambda:True):
         if not allowed():return SendResult(False,'任务已取消',status='cancelled')

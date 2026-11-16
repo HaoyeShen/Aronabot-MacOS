@@ -36,6 +36,10 @@ with tempfile.TemporaryDirectory(prefix='wemac-install-fixture-') as td:
     profile=json.loads((base/'data/native-profile-isolated.json').read_text())
     assert str(base/'自定义安装目录') in profile['app']
     assert Path(profile['corePath']).is_file() and Path(profile['nativeDatabase']['bridge']['path']).is_file()
+    cdn_bridge=Path(profile['nativeCdnDownload']['bridge']['path'])
+    assert cdn_bridge.is_file()
+    assert hashlib.sha256(cdn_bridge.read_bytes()).hexdigest()==profile['nativeCdnDownload']['bridge']['sha256']
+    assert str(base/'fake-home') in profile['nativeCdnDownload']['cacheRoot']
     check=subprocess.run([str(installed/'Contents/MacOS/Wemac-auto 安装助手'),'--package-check'],env=dict(os.environ,ARONA_DATA_DIR=str(base/'data')),capture_output=True,text=True,timeout=45)
     print(check.stdout,check.stderr[-1000:]);assert check.returncode==0
     cli=subprocess.run([str(installed.parent/'bin/wechat-aumac'),'--help'],capture_output=True,text=True,timeout=30)

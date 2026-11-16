@@ -68,3 +68,7 @@ See [native API](docs/native-api.md), [setup and stability](docs/background-send
 ## Native SNS images and desktop voice compatibility
 
 Single-image Moments publishing and exact-post comments now use the selected client’s native CDN/SNS functions. See [usage, bounds and validation](docs/native-sns-images.md). The bot includes a Moments page and supports diary illustrations. Voice output uses 24 kHz Tencent SILK with matching metadata, verified audible on desktop.
+
+## Native incoming images, files and shared content
+
+Version 0.3.3 fixes native background image download, V2 cache decoding and WXGF conversion before vision requests. The bot reads TXT/Markdown, Word, PDF and common Office/text attachments through native downloads; accessible article bodies and decodable shared-video media are processed with explicit evidence and availability limits. See [implementation, privacy, limits and validation](docs/native-incoming-media.md). Character TTS remains local; image understanding and DeepSeek video ASR use the configured cloud APIs.

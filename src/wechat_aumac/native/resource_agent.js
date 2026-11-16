@@ -7,6 +7,7 @@ function pinned(name){const entry=CONFIG.functions[name];if(!entry)throw Error('
     const actual=Array.from(new Uint8Array(p.readVolatile(entry.head.length/2))).map(v=>v.toString(16).padStart(2,'0')).join('');
     if(actual!==entry.head)throw Error('Resource function instructions changed');return p;}
 const keyGetter=new NativeFunction(pinned('resourceKeyGetter'),['uint64','uint64','uint64'],[]);
+const imageDecoder=CONFIG.functions.decodeImageFile ? new NativeFunction(pinned('decodeImageFile'),'int',['pointer','pointer']) : null;
 const sizedDelete=new NativeFunction(pinned('sizedDelete'),'void',['pointer','uint64']);
 const api=(name,ret,args)=>new NativeFunction(Module.getGlobalExportByName(name),ret,args);
 const fopen=api('fopen','pointer',['pointer','pointer']),fseek=api('fseek','int',['pointer','int64','int']);
@@ -31,7 +32,21 @@ function file(path){
         return {data,size};
     }finally{fclose(stream);}
 }
-rpc.exports={decode(path,offset=0,length=0,material=null,variant=0){
+rpc.exports={decodeImage(path){
+    if(closed||!imageDecoder)throw Error('Native cached-file decoder unavailable');
+    if(typeof path!=='string'||!path.startsWith(CONFIG.accountRoot+'/')||path.includes('/../')||path.includes('\0'))throw Error('Image outside selected account');
+    const relative=path.slice(CONFIG.accountRoot.length+1);
+    if(!/^msg\/attach\/[a-f0-9]{32}\/[0-9]{4}-[0-9]{2}\/(?:Img|File|Video)\/[^/]+$/.test(relative)&&
+       !/^cache\/[0-9]{4}-[0-9]{2}\/Message\/[a-f0-9]{32}\/(?:Thumb|Bubble)\/[^/]+$/.test(relative))throw Error('Cached attachment path is not allowlisted');
+    const bytes=Memory.allocUtf8String(path),size=unescape(encodeURIComponent(path)).length,input=Memory.alloc(24),output=Memory.alloc(24);
+    input.writePointer(bytes);input.add(8).writeU64(size);input.add(16).writeU64(uint64('0x8000000000000000').or(uint64(size+1)));
+    output.writeByteArray(new Array(24).fill(0));
+    try {
+        const code=imageDecoder(input,output),flag=output.add(23).readU8(),long=!!(flag&128),length=long?output.add(8).readU64().toNumber():flag;
+        if(code<0||length<1||length>32*1024*1024)throw Error('Native cached-file decode failed: '+code);
+        return {bytes:Array.from(new Uint8Array((long?output.readPointer():output).readVolatile(length))),native:true};
+    }finally{if(output.add(23).readU8()&128)sizedDelete(output.readPointer(),output.add(16).readU64().and(uint64('0x7fffffffffffffff')));}
+},decode(path,offset=0,length=0,material=null,variant=0){
     if(closed)throw Error('Native resource reader closed');
     if(!Number.isSafeInteger(offset)||offset<0||!Number.isSafeInteger(length)||length<0||length>8*1024*1024)throw Error('Native resource bounds invalid');
     const input=file(path),result=keyGetter(),string=Memory.alloc(24);

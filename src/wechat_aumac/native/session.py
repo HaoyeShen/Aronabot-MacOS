@@ -115,6 +115,7 @@ class NativeSession:
         self.cleanup_errors = []
         self._database_reader = None
         self._sns_upload_reader = None
+        self._cdn_download_reader = None
         self._resource_reader = None
         self._database_lock = threading.RLock()
         self._rpc_lock = threading.RLock()
@@ -886,17 +887,40 @@ class NativeSession:
     def download_sticker(self,entry,directory):
         return self._resources().download_sticker(entry,directory)
 
+    def _cdn_download(self):
+        with self._database_lock:
+            if self._cdn_download_reader is None:
+                from .cdn_download import NativeCdnDownload
+                self._cdn_download_reader=NativeCdnDownload(self)
+            return self._cdn_download_reader
+
+    def download_attachment(self,message,directory):
+        return self._resources().download_attachment(message,directory)
+
+    def download_public_resource(self,url,*,timeout=20):
+        """Read a public HTTPS resource through WeChat's native HTTP downloader."""
+        return self._cdn_download().download(url,'',kind='http',timeout=timeout)
+
     def verify_sticker_file(self,entry,path):
         """Check exact original bytes, or the native WXGF transcode provenance."""
         return self._resources().verify_sticker_file(entry,path)
 
     def download_media(self,message,directory):
+        if message.get('message_type')==3:
+            return self._resources().download_image(message,directory)
         if message.get('message_type')!=47:
             raise NativeError('This native profile does not yet expose the image/video cache decoder')
         root=parse_xml(message.get('text') or '')
         node=root if root.tag=='emoji' else root.find('.//emoji')
         if node is None:raise ValueError('Native emoji message has no resource metadata')
-        return self.download_sticker({'md5':node.get('md5'),'locations':[{'page':'favorite'}]},directory)
+        entry={'md5':node.get('md5'),'locations':[{'page':'favorite'}]}
+        # Incoming installed-pack emoji may exist only inside the pack store.
+        # Resolve its exact MD5 instead of substituting a package thumbnail.
+        try:
+            entry['locations'].extend(self._database().sticker_locations(entry['md5']))
+        except Exception:
+            pass
+        return self.download_sticker(entry,directory)
 
 
 
@@ -992,6 +1016,9 @@ class NativeSession:
                     if self._sns_upload_reader:
                         self._sns_upload_reader.close()
                         self._sns_upload_reader = None
+                    if self._cdn_download_reader:
+                        self._cdn_download_reader.close()
+                        self._cdn_download_reader = None
                     if self._resource_reader:
                         self._resource_reader.close()
                         self._resource_reader = None

@@ -125,3 +125,7 @@ PYTHONPATH=src python3 -m unittest discover -s tests -q
 ### 朋友圈配图与原生语音更新
 
 现已支持 `publish_image_moment(text, path, visibility=...)` 及 `native-moment-publish --image`。图片上传、发布与评论均调用内部函数，已完成服务器确认和独立回读；见 [配图与评论说明](docs/native-sns-images.md)。机器人提供独立“朋友圈”页面，日记配图也使用该接口。语音默认改为 24 kHz SILK，以解决旧 AMR 语音在电脑端无声的问题。
+
+### Incoming media and documents
+
+Native background image/attachment downloads, readable animation frames, local document parsing and actual video observations are described in [后台图片、附件与分享内容读取](docs/native-incoming-media.md).

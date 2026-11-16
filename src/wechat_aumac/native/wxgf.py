@@ -53,8 +53,11 @@ def _worker(request):
             durations.append(max(10,min(10000,int(duration) or 100)))
     finally:close(context)
     destination=Path(request['destination'])
-    frames[0].save(destination,format='GIF',save_all=True,append_images=frames[1:],
-                   duration=durations,loop=0,disposal=2,optimize=False)
+    if count == 1:
+        frames[0].save(destination, format='PNG', optimize=True)
+    else:
+        frames[0].save(destination,format='GIF',save_all=True,append_images=frames[1:],
+                       duration=durations,loop=0,disposal=2,optimize=False)
     if destination.stat().st_size>8*1024*1024:
         destination.unlink();raise ValueError('Converted animation exceeds the native send bound')
     with Image.open(destination) as check:

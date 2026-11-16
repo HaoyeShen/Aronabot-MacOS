@@ -161,7 +161,8 @@ def main() -> int:
         window = MainWindow(root, service, icon)
         from app.menu_bar import MenuBar
         menu_bar=MenuBar(root,window)
-        instance.start(root,menu_bar.show)
+        from app.native_control import handle as native_control
+        instance.start(root,menu_bar.show,lambda request:native_control(service,request))
 
         def report_callback_exception(exc_type, exc_value, exc_tb):
             detail = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
@@ -189,7 +190,14 @@ def main() -> int:
         return 1
 
 if __name__=='__main__':
-    if len(sys.argv)==3 and sys.argv[1]=='--web-render-worker':
+    if len(sys.argv)==2 and sys.argv[1]=='--incoming-document-worker':
+        from app.incoming_documents import worker_main
+        worker_main()
+    elif len(sys.argv)==2 and sys.argv[1]=='--incoming-video-worker':
+        import json
+        from app.incoming_video import _worker
+        print(json.dumps(_worker(json.load(sys.stdin))))
+    elif len(sys.argv)==3 and sys.argv[1]=='--web-render-worker':
         from app.web_media import render_worker
         render_worker(sys.argv[2])
     else:raise SystemExit(main())

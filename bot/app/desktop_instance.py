@@ -1,6 +1,6 @@
 """One desktop process per user data directory; repeated launches reopen it."""
 from __future__ import annotations
-import fcntl,socket,threading
+import fcntl,json,socket,threading
 from .paths import DATA,ensure_dirs
 
 class DesktopInstance:
@@ -17,7 +17,7 @@ class DesktopInstance:
         self.server=socket.socket(socket.AF_UNIX,socket.SOCK_STREAM)
         self.server.bind(str(self.path));self.path.chmod(0o600);self.server.listen(4);self.server.settimeout(.5)
         return True
-    def start(self,root,show):
+    def start(self,root,show,native_control=None):
         def worker():
             while not self.stop.is_set():
                 try:connection,_=self.server.accept()
@@ -26,7 +26,17 @@ class DesktopInstance:
                 with connection:
                     connection.settimeout(1)
                     try:
-                        if connection.recv(32).strip()==b'show':root.after(0,show)
+                        data=b''
+                        while len(data)<=16384:
+                            chunk=connection.recv(min(4096,16385-len(data)))
+                            if not chunk:break
+                            data+=chunk
+                            if b'\n' in data:break
+                        if data.strip()==b'show':root.after(0,show)
+                        elif native_control and len(data)<=16384:
+                            try:response={'ok':True,'result':native_control(json.loads(data))}
+                            except Exception as exc:response={'ok':False,'error':str(exc)}
+                            connection.sendall((json.dumps(response)+'\n').encode())
                     except (OSError,RuntimeError):pass
         threading.Thread(target=worker,name='arona-reopen',daemon=True).start()
     def close(self):
