@@ -267,6 +267,8 @@ class BotService:
                              daemon=True).start()
             threading.Thread(target=self._news_loop, name="arona-news",
                              daemon=True).start()
+            threading.Thread(target=self._moments_loop, name="arona-moments",
+                             daemon=True).start()
             self._idle_stop = threading.Event()
             threading.Thread(target=self._idle_loop, args=(self._idle_stop,),
                              name="arona-idle-chat", daemon=True).start()
@@ -1520,11 +1522,18 @@ class BotService:
                 self._news_tick()
             except Exception as exc:
                 log.debug("基沃托斯新闻定时检查失败：%s", exc)
-            try:
-                self.diary.tick()
-                self.moments_reader.tick()
-            except Exception as exc:
-                log.warning('今日日记调度异常：%s',type(exc).__name__)
+
+    def _moments_tick(self):
+        # A slow news fetch or a failed diary must not suppress comments.
+        for name,job in (('今日日记',self.diary),('朋友圈评论',self.moments_reader)):
+            try:job.tick()
+            except Exception as exc:log.warning('%s调度异常：%s',name,type(exc).__name__)
+
+    def _moments_loop(self):
+        # Check overdue work immediately on connection/reconnection.
+        while self._running and not self._stop_event.is_set():
+            self._moments_tick()
+            if self._stop_event.wait(25):break
 
     def _news_tick(self) -> None:
         targets = self.news.enabled_targets()

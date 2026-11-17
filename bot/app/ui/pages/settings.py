@@ -107,6 +107,8 @@ class SettingsPage(BasePage):
         ToggleRow(moments.body,'自动浏览并评论',self.moments_enabled,'默认关闭；每条动态最多尝试一次，不评论自己的动态').pack(fill='x')
         self.moments_interval=LabeledEntry(moments.body,'检查间隔（分钟）',str(self.config.bot.get('moments_comment_interval_minutes',30)),hint='5–1440',width=8)
         self.moments_interval.pack(fill='x',pady=px(6))
+        RoundedButton(moments.body,text='应用日记与评论设置',command=self.save_moments_settings,width=200,height=32).pack(anchor='w',pady=px(6))
+        tk.Label(moments.body,text='仅设置时间不会启用任务；开启开关后点击应用。发布按北京时间，评论由模型判断是否合适。',wraplength=px(410),justify='left',bg=C['card'],fg=C['muted'],font=font(8)).pack(fill='x')
         RoundedButton(moments.body,text='读取并预览评论',command=self.preview_moments,width=160,height=32).pack(anchor='w')
         self.moments_preview=tk.Text(moments.body,height=5,wrap='word',font=font(8),bg=C['card_soft'],fg=C['text'],relief='flat')
         self.moments_preview.insert('1.0','预览不会发评论；通过微信内部函数读取。\n图片和视频本轮不可见；目标不唯一或原生参数不匹配时不提交。')
@@ -320,6 +322,20 @@ class SettingsPage(BasePage):
         text.insert('1.0','\n'.join(lines))
         text.configure(state='disabled')
         dialog.add_footer('关闭',dialog.close);dialog.show()
+
+    def save_moments_settings(self):
+        try:
+            when=datetime.strptime(self.diary_time.get(),'%H:%M').strftime('%H:%M')
+            interval=int(self.moments_interval.get())
+            if not 5<=interval<=1440:raise ValueError('检查间隔需为5到1440分钟')
+        except ValueError:
+            self.app.toast('请输入有效的 HH:MM 时间和5到1440分钟的间隔。','error');return
+        self.config.bot.update(diary_enabled=self.diary_enabled.get(),diary_time=when,
+            diary_attach_sticker=self.diary_sticker.get(),moments_comment_enabled=self.moments_enabled.get(),
+            moments_comment_interval_minutes=interval)
+        self.config.save()
+        self.service.moments_reader.next_at=0
+        self.app.toast('日记与评论设置已保存；机器人连接时自动生效。','success')
 
     def preview_moments(self):
         if getattr(self,'_moments_busy',False):return
