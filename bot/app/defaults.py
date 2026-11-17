@@ -67,6 +67,8 @@ DEFAULT_CONFIG = {
     "bot": {
         "roleplay_free_mode": False,
         "reasoning_intensity": "medium",
+        "economy_enabled": False,
+        "economy_local_model": "qwen3.5:9b",
         "moments_comment_enabled": False,
         "moments_comment_interval_minutes": 30,
         "diary_enabled": False,

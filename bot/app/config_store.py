@@ -150,6 +150,8 @@ class ConfigStore:
         bot['native_sticker_enabled']=bool(bot.get('native_sticker_enabled',True))
         from .reasoning import level
         bot['reasoning_intensity']=level(bot.get('reasoning_intensity'))
+        bot['economy_enabled']=bool(bot.get('economy_enabled',False))
+        bot['economy_local_model']=str(bot.get('economy_local_model') or 'qwen3.5:9b').strip()[:100]
         bot['moments_comment_enabled']=bool(bot.get('moments_comment_enabled',False))
         bot.pop('singing_enabled',None)  # Singing task cancelled by the user.
         try:bot['moments_comment_interval_minutes']=max(5,min(1440,int(bot.get('moments_comment_interval_minutes',30))))

@@ -100,6 +100,11 @@ class SettingsPage(BasePage):
                  wraplength=px(410),justify='left',bg=C['card'],fg=C['muted'],font=font(8)).pack(fill='x',pady=px(8))
         self.free_mode=self._var('roleplay_free_mode',self.config.bot.get('roleplay_free_mode',False),tk.BooleanVar)
         ToggleRow(intelligence.body,'无限制模式（角色扮演）',self.free_mode,'保持当前角色，仅放宽话题与表达；虚构情境可描写人类生活。接入服务规则、消息时效与会话核对仍生效').pack(fill='x')
+        self.economy_enabled=self._var('economy_enabled',self.config.bot.get('economy_enabled',False),tk.BooleanVar)
+        ToggleRow(intelligence.body,'节省模式',self.economy_enabled,'默认关闭；开启后本地处理短上下文摘要和简单分类，失败回退原模型。正式回答、识图及发布决策仍使用原模型。').pack(fill='x')
+        self.economy_model=LabeledEntry(intelligence.body,'本地 Ollama 模型',self.config.bot.get('economy_local_model','qwen3.5:9b'),hint='需已安装；本机服务127.0.0.1:11434',width=22)
+        self.economy_model.pack(fill='x',pady=px(6))
+        RoundedButton(intelligence.body,text='检查本地模型',command=self.check_economy_model,width=160,height=32).pack(anchor='w')
         moments=Card(right,padding=16)
         moments.pack(fill='x',pady=(px(12),0))
         SectionHeading(moments.body,'浏览朋友圈与评论','读取近24小时文字动态，由当前人格判断是否适合评论').pack(fill='x',pady=(0,px(8)))
@@ -303,6 +308,17 @@ class SettingsPage(BasePage):
                    "native": "macOS 原生内部函数"}
         self.backend.set(mapping.get(self.config.wechat.get("backend", "auto"), "自动选择"))
 
+    def check_economy_model(self):
+        model=self.economy_model.get().strip()
+        def work():
+            try:
+                from ...economy import local_models
+                names=local_models(start=True)
+                result={'ok':model in names,'message':('本地模型已安装：'+model if model in names else '未安装此模型；已安装：'+', '.join(names))}
+            except Exception as exc:result={'ok':False,'message':'本地服务不可用：'+type(exc).__name__+'；简单任务将回退原模型。'}
+            self.service.emit('economy_check_done',result)
+        threading.Thread(target=work,daemon=True).start()
+
     def on_show(self) -> None:
         self._load()
 
@@ -364,6 +380,9 @@ class SettingsPage(BasePage):
         threading.Thread(target=work,daemon=True).start()
 
     def on_event(self,kind,data):
+        if kind=='economy_check_done':
+            self.app.toast(data.get('message',''),'success' if data.get('ok') else 'warning')
+            return
         if kind=='moments_preview_done':
             self._moments_busy=False
             self.moments_preview.configure(state='normal');self.moments_preview.delete('1.0','end')
@@ -406,6 +425,8 @@ class SettingsPage(BasePage):
         backend_before = self.config.wechat.get("backend", "auto")
         bot = self.config.bot
         bot.update({
+            'economy_enabled':self.economy_enabled.get(),
+            'economy_local_model':self.economy_model.get().strip() or 'qwen3.5:9b',
             'reasoning_intensity':{'轻度':'light','中':'medium','高':'high','极高':'extreme','高消耗':'high_consumption'}.get(self.effort.get(),'medium'),
             'roleplay_free_mode':self.free_mode.get(),
             'moments_comment_enabled':self.moments_enabled.get(),
