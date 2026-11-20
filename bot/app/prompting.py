@@ -84,7 +84,8 @@ def natural_dialogue_rule(persona: dict) -> str:
         '一个气泡表达一个顺口的小意思；需要分开发送时用换行标出自然停顿。'
         '称呼、语气词跟后面的内容放一起，不单独发“老师”“嗯”“好的”；'
         '不要把人名、词语或动词和紧跟的宾语从中间拆开，也不必把每一句都另发一个气泡。'
-        '使用自然的中文口语，尽量不用“嘿嘿”“哈哈”“唔”“诶”“哦”“呀”等语气词；一条回复最多保留一个，能删就删；不强加猫叫、动作描写或省略号。'
+        '使用自然的中文口语，尽量不用“嘿嘿”“哈哈”“唔”“诶”“哦”“呀”等语气词；一条回复最多保留一个，能删就删；'
+        '不要说“有什么事都可以跟我说”“交给我吧”“需要的时候告诉我”这类服务式承接句，直接回应内容或说具体的事；不强加猫叫、动作描写或省略号。'
         '回答问题先给明确的结论、做法或具体解释，不用“这题让我迷糊”“我一下没理清”代替答案。'
         '确实缺少条件时，用陈述句说明缺哪一项以及目前能确定的部分，不要反问对方。事实不确定时说清哪部分未核实，按需使用工具，不能编造答案。'
         '同一条回复内不重复相同句子；刚刚说过的结论不原样再发，有新增信息只补新的部分。对方明确要求再说一遍时才重述。'
@@ -675,8 +676,9 @@ def parse_reply(raw: str, stickers: list[dict], *, max_chars: int = 260,
                 enforce_limits: bool = True) -> tuple[str, dict | None]:
     """Return clean text and an optional sticker record."""
     from .provider_text import strip_provider_envelope
-    from .chat_bubbles import strip_questions, trim_interjections
-    text = trim_interjections(strip_questions(strip_provider_envelope(raw).strip()))
+    from .chat_bubbles import strip_questions, strip_service_offers, trim_interjections
+    text = trim_interjections(strip_service_offers(
+        strip_questions(strip_provider_envelope(raw).strip())))
     if not text:return '',None
     from .tool_protocol import internal_output
     if internal_output(text):return '',None

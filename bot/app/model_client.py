@@ -673,7 +673,7 @@ class ModelClient:
         # Strip the "[sender] " prefix used for group context.
         clean = re.sub(r"^\[[^\]]+\]\s*", "", raw)
         if any(w in clean for w in ("在吗", "你好", "早上好", "晚上好", "嗨", "hello", "hi")):
-            return "老师，阿洛娜在。随时可以开始。"
+            return "老师，阿洛娜在。"
         if '天气' in clean:
             return '好天气确实让人心情轻松。'
         if '随便聊聊' in clean:

@@ -33,6 +33,26 @@ def trim_interjections(text: str) -> str:
     return value.strip()
 
 
+_OFFER = re.compile(
+    r'(?:有什么(?:事|需要|想做的|想聊的)?[^。！？!?，,]{0,10}(?:都|就|尽管)?(?:可以)?'
+    r'(?:跟我说|告诉阿洛娜|交给阿洛娜|找阿洛娜|交给我)'
+    r'|交给我吧|需要的时候(?:直接)?(?:告诉|找)我|随时(?:可以)?(?:找我|告诉我)'
+    r'|我来帮你|有需要(?:随时)?(?:告诉|找)我|尽管(?:交给|告诉)我|我帮你(?:看看|处理|改|弄)?吧)')
+
+
+def strip_service_offers(text: str) -> str:
+    """Remove "交给我吧 / 有什么事都可以跟我说" style service offers."""
+    value = str(text or '').strip()
+    if not value or not _OFFER.search(value):
+        return value
+    clauses = re.split(r'(?<=[，,。！？!?；;\n])', value)
+    kept = [part for part in clauses
+            if part.strip() and not _OFFER.search(part)]
+    value = ''.join(kept).strip()
+    value = re.sub(r'[，,、；;：:\s]+$', '', value).strip()
+    return value
+
+
 def strip_questions(text: str) -> str:
     """Drop question clauses; this product replies with statements only.
 

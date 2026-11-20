@@ -147,6 +147,32 @@ def main():
             joined = ' '.join(text for _, text in adapter.sent)
             assert joined and '嘿嘿' not in joined and '数学考试确实难' in joined, adapter.sent
 
+            # The local human-style summary is appended to the reply prompt.
+            adapter.sent.clear()
+            ninth = IncomingMessage('test', '小明', '在吗', chat_type='friend')
+            row9 = service._store_user(ninth, ninth.content)
+            captured = {}
+            def capture(*args, **kwargs):
+                captured['system'] = args[2] if len(args) > 2 else kwargs.get('system', '')
+                return (LLMResult('知道了。', 'fixture', 'openai', 1), {}, '',
+                        {'agent': {'status': 'completed'}})
+            with patch.object(service, '_human_style_block',
+                              return_value='【本机人类聊天语感】MARKER'), \
+                 patch.object(service, '_model_reply', side_effect=capture):
+                service._generate_and_send(ninth, target, row9, ninth.content, force_reply=True)
+            assert 'MARKER' in captured.get('system', ''), captured
+
+            # Service offers are removed before the text reaches WeChat.
+            adapter.sent.clear()
+            tenth = IncomingMessage('test', '小明', '今天数学考试好难', chat_type='friend')
+            row10 = service._store_user(tenth, tenth.content)
+            with patch.object(service, '_model_reply',
+                              return_value=(LLMResult('数学考试确实难。交给我吧。', 'fixture', 'openai', 1),
+                                            {}, '', {'agent': {'status': 'completed'}})):
+                service._generate_and_send(tenth, target, row10, tenth.content, force_reply=True)
+            joined = ' '.join(text for _, text in adapter.sent)
+            assert '交给我' not in joined and '数学考试确实难' in joined, adapter.sent
+
             # Short replies use at most two bubbles; longer information may use more.
             short_bubbles = service._split_reply_messages('一'*20 + '，' + '二'*20, [], False, 25, 25)
             assert short_bubbles and len(short_bubbles) <= 2, short_bubbles
