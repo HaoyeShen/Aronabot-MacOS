@@ -7,7 +7,7 @@ import traceback
 import tempfile
 import time
 import threading
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -61,6 +61,46 @@ def main() -> int:
         assert not errors
         app.toast("界面提示测试", "info")  # exercises the callable ToastManager
         app.toast.hide()
+        # Closing the window must only hide it so the background listener keeps
+        # running; the status item is the way back.  NSStatusBar needs a real
+        # app session, so the window and status-item wiring is covered by stubs.
+        class StubMenu:
+            def __init__(self):
+                self.hidden = 0
+            def hide(self):
+                self.hidden += 1
+        class StubWindow:
+            def __init__(self):
+                self._bot_action_busy = False
+                self.calls = []
+            def toggle_bot(self):
+                self.calls.append('toggle')
+            def quit_app(self):
+                self.calls.append('quit')
+                return True
+        stub_menu = StubMenu()
+        app.menu_bar = stub_menu
+        service._running = True
+        app.close()
+        assert stub_menu.hidden == 1 and service.running, 'closing the window must keep the bot running'
+        service._running = False
+        app.menu_bar = None
+        from app.menu_bar import MenuBar
+        bar = MenuBar.__new__(MenuBar)
+        stub_window = StubWindow()
+        bar.window = stub_window
+        bar.service = service
+        bar.closed = False
+        bar.item = Mock()
+        bar.start()
+        assert stub_window.calls == ['toggle'], 'status item start must toggle the bot'
+        service._running = True
+        bar.stop()
+        assert stub_window.calls == ['toggle', 'toggle'], 'status item stop must toggle the bot'
+        service._running = False
+        with patch('app.menu_bar.NSStatusBar'):
+            bar.quit()
+        assert stub_window.calls[-1] == 'quit' and bar.closed, 'status item quit must exit the app'
         # A busy flag must be cleared when a start/stop callback returns.
         app._bot_action_busy = True
         app.topbar.action.set_busy(True, "连接中")
