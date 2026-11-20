@@ -31,6 +31,7 @@ from .model_audit import model_call
 from .agent_runtime import task_entry
 from .model_client import make_client
 from .paths import DATA
+from .chat_bubbles import normalize_punctuation
 from .news_sources import SOURCES, FEEDS, SourceCandidates
 from .prompting import reduce_ellipsis
 from .news_evidence import (ArticleEvidence, published_time, is_recent, news_now,
@@ -1319,6 +1320,7 @@ class NewsService:
                 grouped = checked
                 persona = self.personas.get(target.get('persona_id') or self.config.data.get('active_persona_id'))
                 message = self._fallback_message(grouped, latest, persona)
+            message = normalize_punctuation(message)
             try:
                 result = adapter.send_text(target_name, message)
             except Exception as exc:

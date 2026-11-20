@@ -5,7 +5,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from app.chat_bubbles import strip_leading_address, strip_questions, trim_interjections
+from app.chat_bubbles import (normalize_punctuation, strip_leading_address,
+                               strip_questions, trim_interjections)
 from app.config_store import ConfigStore, PersonaStore, StickerStore
 from app.memory import MemoryStore
 from app.model_client import LLMResult
@@ -36,6 +37,7 @@ def main():
     assert trim_interjections('嘿嘿，交给我吧。') == '交给我吧。'
     assert trim_interjections('阿洛娜一直守着消息呢 嘿嘿') == '阿洛娜一直守着消息呢'
     assert trim_interjections('哈尔滨今天降温了。') == '哈尔滨今天降温了。'
+    assert normalize_punctuation('A——B') == 'A B'
     assert strip_leading_address('Harry昊昊老师 阿洛娜在', 'Harry昊昊老师',
                                  ('Harry昊昊', '老师')) == '阿洛娜在'
     assert not question_only_reply('新闻我看过了，要总结吗？')

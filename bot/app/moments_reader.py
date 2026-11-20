@@ -12,6 +12,7 @@ import time
 from .agent_runtime import RUNTIME
 from .config_store import _atomic_write_json
 from .paths import DATA
+from .chat_bubbles import normalize_punctuation
 from .prompting import build_compact_system_prompt
 
 log = logging.getLogger(__name__)
@@ -103,15 +104,16 @@ class MomentsReader:
                     else '动态：'+post['text']+'\n\n模型选择不评论。')}
             if not s.config.bot.get('moments_comment_enabled',False) or not s._running:return
             key = post_key(post)
+            comment_text = normalize_punctuation(decision.get('text',''))
             records[key] = {'status':'skipped' if decision['action']=='skip' else 'pending',
-                            'at':time.time(), 'text':decision.get('text','')}
+                            'at':time.time(), 'text':comment_text}
             # Persist before any external side effect; pending/uncertain never retries.
             _atomic_write_json(self.path, records)
             if decision['action'] == 'skip':
                 self.next_at=time.monotonic()+300
                 log.info('朋友圈自动评论 · 模型决定跳过 · %s',key[:8])
                 return {'ok':True,'message':'本条朋友圈无需评论。'}
-            result = adapter.comment_moment(post, decision['text'], allowed=lambda: bool(
+            result = adapter.comment_moment(post, comment_text, allowed=lambda: bool(
                 s._running and s.config.bot.get('moments_comment_enabled',False) and not s._reply_busy))
             records[key]['status'] = 'sent' if result.ok else 'uncertain' if result.status=='unconfirmed' or result.detail == 'uncertain' else 'not_sent'
             _atomic_write_json(self.path,records)

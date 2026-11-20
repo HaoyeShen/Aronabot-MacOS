@@ -14,6 +14,7 @@ import os
 
 from .agent_runtime import RUNTIME
 from .config_store import _atomic_write_json as atomic_write_json
+from .chat_bubbles import normalize_punctuation
 from .defaults import default_stickers
 from .model_audit import model_call
 from .model_client import make_client
@@ -258,7 +259,7 @@ class DailyDiary:
                 if image and fingerprint(image)!=record.get('sticker_digest'):
                     image=None;record['image_attached']=False
                     records[key]=record;atomic_write_json(self.path,records)
-                result=adapter.publish_moment(record['text'],image)
+                result=adapter.publish_moment(normalize_punctuation(record['text']),image)
             record['status']='published' if result.ok else ('uncertain' if result.status=='unconfirmed' or result.detail=='uncertain' else 'draft')
             if result.ok:
                 post_id=(result.metadata.get('post') or {}).get('post_id')

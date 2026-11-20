@@ -43,8 +43,8 @@ from .web_search import (
 from .reply_fallbacks import (bare_opener, content_free_reply, fallback_reply,
                               question_only_reply, vague_non_answer)
 from .roleplay_mode import generic_shutdown
-from .chat_bubbles import (split_chat_bubbles, strip_leading_address, strip_questions,
-                              strip_service_offers, trim_interjections)
+from .chat_bubbles import (normalize_punctuation, split_chat_bubbles, strip_leading_address,
+                              strip_questions, strip_service_offers, trim_interjections)
 from .evidence_text import evidence_excerpt
 from .diary import DailyDiary
 from .moments_reader import MomentsReader
@@ -1389,6 +1389,7 @@ class BotService:
                 return True
             else:
                 message = f'模型这次没选到符合要求的{label}链接。'
+            message = normalize_punctuation(message)
             with self._adapter_lock:
                 if (cancelled() or adapter.chat_identity(chat) != receiver
                         or (candidate and not self.config.bot.get('web_search_enabled',True))):
