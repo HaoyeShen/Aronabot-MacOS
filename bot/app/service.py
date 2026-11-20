@@ -40,7 +40,7 @@ from .web_search import (
     explicit_search, time_sensitive, factual_question, search_forbidden, baike_forbidden, evidence_block,
     WebPage, _url as public_page_url,
 )
-from .reply_fallbacks import fallback_reply, vague_non_answer
+from .reply_fallbacks import fallback_reply, content_free_reply, vague_non_answer
 from .roleplay_mode import generic_shutdown
 from .chat_bubbles import split_chat_bubbles
 from .evidence_text import evidence_excerpt
@@ -2669,6 +2669,28 @@ class BotService:
                 else:result=replace(result,text=self._fallback_reply(incoming,persona,'thinking'))
             except Exception:
                 result=replace(result,text=self._fallback_reply(incoming,persona,'network'))
+        names=(incoming.sender,persona.get('name'),'阿洛娜','Arona',incoming.chat)
+        if (not cat_sound_requested(incoming.content)
+                and content_free_reply(result.text,names,incoming.content)):
+            try:
+                from .tool_protocol import internal_output
+                enriched = model_call(client,'chat','回复消息：补充有效信息',messages,
+                    system+'\n刚才的回复只有附和、在场确认或复述，对方没有获得新信息。保持当前角色和语气，'
+                    '围绕这条消息补充一条具体、可核对的信息、你自己的判断或一个具体问题；没有可靠信息就'
+                    '说清不确定或问一个具体条件，不要编造，不要变成说教或未被请求的建议，不要重复对方原话。'
+                    '可以分成两个气泡，但每条不要超过字数限制。')
+                self._record_usage(enriched,incoming.chat,'reply-substance')
+                enriched_text = self._natural_reply_text(enriched.text, stickers, allow_sticker, persona)
+                if (enriched_text and not content_free_reply(enriched.text,names,incoming.content)
+                        and not internal_output(enriched.text)):
+                    result = enriched
+                    log.info('回复只有附和，已补充具体信息 · %s', incoming.chat)
+                else:
+                    log.info('补充后仍无有效信息，保留原回复 · %s', incoming.chat)
+            except ReplyExpired:
+                self.emit('typing_done',{'chat':incoming.chat});return
+            except Exception as exc:
+                log.debug('补充有效信息失败，保留原回复 · %s · %s', incoming.chat, type(exc).__name__)
         explicit_repeat=bool(repeat_requested(incoming.content))
         if not requested_voice and not explicit_repeat and self._reply_recently_delivered(incoming.chat,result.text,persona):
             try:

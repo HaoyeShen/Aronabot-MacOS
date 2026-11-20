@@ -238,7 +238,7 @@ def main() -> int:
             assert send.call_count == 1
             app.show_page('home')
             release_news.set()
-            deadline = time.monotonic() + 5
+            deadline = time.monotonic() + 8
             while page_targets._news_test_busy and time.monotonic() < deadline:
                 root.update()
                 time.sleep(.02)

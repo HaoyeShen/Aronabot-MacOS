@@ -87,5 +87,58 @@ def fallback_reply(text: str, persona_id: str, reason: str, turn: int = 0,
     return '这部分还不确定。'
 
 
+_FILLER = re.compile(
+    r'(?:在的|在呢|我在|一直都在|一直|都|在|哦|呀|啊|呢|嗯|唔|诶|哈|嘿嘿|好的|好|收到|知道了|'
+    r'确实|原来|是这样|听起来|辛苦了|抱抱|没事|当然|可以|对的|是的|没错|欢迎|早上好|晚安|'
+    r'哈喽|你好|老师|懂了|明白了|了解了|晓得了|好嘞)')
+_PUNCT = re.compile(r'[\s，。！？、,.!?~～…—\-—：:；;“”"\'（）()]+')
+_MEDIA = re.compile(r'\[[^\]]+\]|[\U0001F300-\U0001FAFF\u2600-\u27BF]')
+_CONFIRM = re.compile(
+    r'(?:已|已经)(?:帮你|给你|为你)?(?:发送|发出|发好|完成|处理|更新|修改|改好|删除|创建|'
+    r'发布|打开|关闭|备份|设好|设置|执行|搞定)|(?:搞定|办妥|弄好|完成了)')
+
+
+def _bigrams(value):
+    value = re.sub(r'[^\u4e00-\u9fa5A-Za-z0-9]', '', str(value or ''))
+    return {value[index:index + 2] for index in range(len(value) - 1)}
+
+
+def content_free_reply(text, names=(), user_text=''):
+    """True for a reply that only acknowledges, echoes or reassures.
+
+    A short "在的" is a valid answer to "在吗", but in normal conversation a
+    whole turn of acknowledgement gives the other side nothing.  The caller
+    repairs it once with a concrete fact, judgement or question; a concrete
+    number/name/code or any remaining subject matter makes this False.
+    """
+    raw = str(text or '').strip()
+    if not raw or len(raw) > 60:
+        return False
+    if _CONFIRM.search(raw):
+        return False
+    value = raw
+    for name in sorted({str(item) for item in names if item and len(str(item)) >= 2},
+                       key=len, reverse=True):
+        value = value.replace(name, '')
+    # Nicknames may be Latin; only tokens the reply itself introduces count as
+    # concrete information (numbers, model names, versions, codes).
+    if re.search(r'\d|[A-Za-z]{2,}', value):
+        return False
+    value = _MEDIA.sub('', value)
+    value = _PUNCT.sub('', value)
+    value = _FILLER.sub('', value)
+    if len(value) <= 1:
+        return True
+    # A short reply made almost entirely of the other side's own words only
+    # echoes the message.  Very short openers ("你好", "在吗") are exempt so a
+    # normal greeting reply is not repaired.
+    source = str(user_text or '').strip()
+    if len(source) >= 6 and len(raw) <= 30:
+        reply_grams = _bigrams(value)
+        if reply_grams and len(reply_grams - _bigrams(source)) <= 1:
+            return True
+    return False
+
+
 def vague_non_answer(text):
     return bool(re.search(r'(?:这题|这个问题)?(?:让)?(?:我)?(?:有点)?(?:迷糊|没理清|没琢磨明白|没弄明白)(?:了|啦|呀|呢|哦|。|！|!|\s)*$',str(text or '').strip()))
