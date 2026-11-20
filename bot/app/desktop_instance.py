@@ -29,26 +29,52 @@ class DesktopInstance:
         self.server.bind(str(self.path));self.path.chmod(0o600);self.server.listen(4);self.server.settimeout(.5)
         return True
     def start(self,root,show,native_control=None):
+        def respond(connection,response):
+            try:connection.sendall((json.dumps(response)+'\n').encode())
+            except OSError:pass
+            finally:
+                try:connection.close()
+                except OSError:pass
+
+        def handle(connection,request):
+            if request.get('command')=='native_send_text':
+                # A slow native send must not block menu actions or reopening.
+                def slow():
+                    try:respond(connection,{'ok':True,'result':native_control(request)})
+                    except Exception as exc:respond(connection,{'ok':False,'error':str(exc)})
+                threading.Thread(target=slow,name='arona-native-call',daemon=True).start()
+                return
+            try:response={'ok':True,'result':native_control(request)}
+            except Exception as exc:response={'ok':False,'error':str(exc)}
+            respond(connection,response)
+
         def worker():
             while not self.stop.is_set():
                 try:connection,_=self.server.accept()
                 except socket.timeout:continue
                 except OSError:break
-                with connection:
-                    connection.settimeout(1)
-                    try:
-                        data=b''
-                        while len(data)<=16384:
-                            chunk=connection.recv(min(4096,16385-len(data)))
-                            if not chunk:break
-                            data+=chunk
-                            if b'\n' in data:break
-                        if data.strip()==b'show':root.after(0,show)
-                        elif native_control and len(data)<=16384:
-                            try:response={'ok':True,'result':native_control(json.loads(data))}
-                            except Exception as exc:response={'ok':False,'error':str(exc)}
-                            connection.sendall((json.dumps(response)+'\n').encode())
-                    except (OSError,RuntimeError):pass
+                connection.settimeout(1)
+                try:
+                    data=b''
+                    while len(data)<=16384:
+                        chunk=connection.recv(min(4096,16385-len(data)))
+                        if not chunk:break
+                        data+=chunk
+                        if b'\n' in data:break
+                except (OSError,RuntimeError):
+                    connection.close();continue
+                if data.strip()==b'show':
+                    try:root.after(0,show)
+                    finally:connection.close()
+                    continue
+                if not native_control or not data or len(data)>16384:
+                    connection.close();continue
+                try:request=json.loads(data)
+                except ValueError:
+                    connection.close();continue
+                if not isinstance(request,dict):
+                    connection.close();continue
+                handle(connection,request)
         threading.Thread(target=worker,name='arona-reopen',daemon=True).start()
     def close(self):
         self.stop.set()
