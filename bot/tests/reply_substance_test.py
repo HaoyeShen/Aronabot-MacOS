@@ -5,7 +5,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from app.chat_bubbles import strip_questions, trim_interjections
+from app.chat_bubbles import strip_leading_address, strip_questions, trim_interjections
 from app.config_store import ConfigStore, PersonaStore, StickerStore
 from app.memory import MemoryStore
 from app.model_client import LLMResult
@@ -36,6 +36,8 @@ def main():
     assert trim_interjections('嘿嘿，交给我吧。') == '交给我吧。'
     assert trim_interjections('阿洛娜一直守着消息呢 嘿嘿') == '阿洛娜一直守着消息呢'
     assert trim_interjections('哈尔滨今天降温了。') == '哈尔滨今天降温了。'
+    assert strip_leading_address('Harry昊昊老师 阿洛娜在', 'Harry昊昊老师',
+                                 ('Harry昊昊', '老师')) == '阿洛娜在'
     assert not question_only_reply('新闻我看过了，要总结吗？')
 
     with tempfile.TemporaryDirectory() as temp:
@@ -121,7 +123,7 @@ def main():
                        return_value=LLMResult('想查资料、看文件 还是聊点游戏？', 'fixture', 'openai', 1)):
                 service._generate_and_send(fifth, target, row5, fifth.content, force_reply=True)
             joined = ' '.join(text for _, text in adapter.sent)
-            assert adapter.sent and '？' not in joined and '想查资料' not in joined, adapter.sent
+            assert joined in ('在', '在的。'), adapter.sent
 
             # A statement plus a clarifying question keeps the statement only.
             adapter.sent.clear()
@@ -172,6 +174,17 @@ def main():
                 service._generate_and_send(tenth, target, row10, tenth.content, force_reply=True)
             joined = ' '.join(text for _, text in adapter.sent)
             assert '交给我' not in joined and '数学考试确实难' in joined, adapter.sent
+
+            # A redundant leading address is dropped from short replies.
+            adapter.sent.clear()
+            eleventh = IncomingMessage('test', '小明', '配置改好了吗', chat_type='friend')
+            row11 = service._store_user(eleventh, eleventh.content)
+            with patch.object(service, '_model_reply',
+                              return_value=(LLMResult('小明老师，改好了。', 'fixture', 'openai', 1),
+                                            {}, '', {'agent': {'status': 'completed'}})):
+                service._generate_and_send(eleventh, target, row11, eleventh.content, force_reply=True)
+            joined = ' '.join(text for _, text in adapter.sent)
+            assert joined.startswith('改好了') and '小明老师' not in joined, adapter.sent
 
             # Short replies use at most two bubbles; longer information may use more.
             short_bubbles = service._split_reply_messages('一'*20 + '，' + '二'*20, [], False, 25, 25)

@@ -40,6 +40,26 @@ _OFFER = re.compile(
     r'|我来帮你|有需要(?:随时)?(?:告诉|找)我|尽管(?:交给|告诉)我|我帮你(?:看看|处理|改|弄)?吧)')
 
 
+def strip_leading_address(text, address, names=()):
+    """Drop a redundant leading address from a short reply.
+
+    "Harry昊昊老师 阿洛娜在" -> "阿洛娜在"; a longer reply keeps the
+    address so the user is still occasionally called by name.
+    """
+    value = str(text or '').strip()
+    if not value:
+        return value
+    candidates = [str(item).strip() for item in (address, *names) if str(item or '').strip()]
+    for candidate in sorted(set(candidates), key=len, reverse=True):
+        if len(candidate) < 2 or not value.startswith(candidate):
+            continue
+        rest = value[len(candidate):].lstrip('，,。.!！?？:：、 \t\n')
+        if rest and len(rest) <= 12:
+            return rest
+        break
+    return value
+
+
 def strip_service_offers(text: str) -> str:
     """Remove "交给我吧 / 有什么事都可以跟我说" style service offers."""
     value = str(text or '').strip()

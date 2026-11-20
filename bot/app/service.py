@@ -43,7 +43,8 @@ from .web_search import (
 from .reply_fallbacks import (bare_opener, content_free_reply, fallback_reply,
                               question_only_reply, vague_non_answer)
 from .roleplay_mode import generic_shutdown
-from .chat_bubbles import split_chat_bubbles, strip_questions, strip_service_offers, trim_interjections
+from .chat_bubbles import (split_chat_bubbles, strip_leading_address, strip_questions,
+                              strip_service_offers, trim_interjections)
 from .evidence_text import evidence_excerpt
 from .diary import DailyDiary
 from .moments_reader import MomentsReader
@@ -2731,10 +2732,9 @@ class BotService:
                     client.timeout = saved_timeout
         if (content_free_reply(result.text,names,user_content)
                 and bare_opener(user_content)):
-            address = address_name(incoming.sender, persona)
-            result = LLMResult(f'{address}，{persona.get("name") or "阿洛娜"}在。',
+            result = LLMResult('在' if '在' in user_content else '你好',
                                'fallback', 'local', 0)
-            log.info('打招呼只有客套，改为简短说明 · %s', incoming.chat)
+            log.info('打招呼只有客套，改为最短回复 · %s', incoming.chat)
         explicit_repeat=bool(repeat_requested(incoming.content))
         if not requested_voice and not explicit_repeat and self._reply_recently_delivered(incoming.chat,result.text,persona):
             try:
@@ -2808,6 +2808,8 @@ class BotService:
                     log.warning("回复重写失败，使用完整短句：%s", type(exc).__name__)
         if denies_voice_capability(result.text):
             result=replace(result,text=requested_speech_fallback(incoming.content) if requested_voice else '我可以发语音。')
+        result = replace(result, text=strip_leading_address(
+            result.text, address_name(incoming.sender, persona), (incoming.sender,)))
         text, chosen = parse_reply(
             result.text, stickers,
             max_chars=max_chars,
