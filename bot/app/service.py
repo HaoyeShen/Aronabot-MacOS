@@ -40,7 +40,8 @@ from .web_search import (
     explicit_search, time_sensitive, factual_question, search_forbidden, baike_forbidden, evidence_block,
     WebPage, _url as public_page_url,
 )
-from .reply_fallbacks import bare_opener, fallback_reply, content_free_reply, vague_non_answer
+from .reply_fallbacks import (bare_opener, content_free_reply, fallback_reply,
+                              question_only_reply, vague_non_answer)
 from .roleplay_mode import generic_shutdown
 from .chat_bubbles import split_chat_bubbles
 from .evidence_text import evidence_excerpt
@@ -2682,15 +2683,17 @@ class BotService:
                     client.timeout = min(12, int(saved_timeout))
                 enriched = model_call(client,'chat','回复消息：补充有效信息',messages,
                     system+'\n刚才的回复只有附和、在场确认或复述，对方没有获得新信息。保持当前角色和语气，'
-                    '围绕这条消息补充一条具体、可核对的信息、你自己的判断或一个具体问题；没有可靠信息就'
-                    '说清不确定或问一个具体条件，不要编造，不要变成说教或未被请求的建议，不要重复对方原话。'
-                    '如果对方只是打招呼、没有具体话题，直接给出两三个具体可做的事情（查资料、发链接、'
-                    '看文件等），不要用“今天怎么样”“有什么事吗”“感觉怎么样”这类泛问应付。'
+                    '围绕这条消息补充一条具体、可核对的信息或你自己的判断；没有可靠信息就说清不确定，'
+                    '不要编造，不要变成说教或未被请求的建议，不要重复对方原话。不要为了凑内容主动提问'
+                    '或罗列选项；只有确实缺少关键条件时才问一个明确缺项。'
                     '可以分成两个气泡，但每条不要超过字数限制。')
                 self._record_usage(enriched,incoming.chat,'reply-substance')
                 enriched_text = self._natural_reply_text(enriched.text, stickers, allow_sticker, persona)
+                # A repair that only asks a question adds no information; a
+                # question is acceptable only when a concrete statement remains.
+                question_ok = not question_only_reply(enriched.text,names)
                 if (enriched_text and not content_free_reply(enriched.text,names,user_content)
-                        and not internal_output(enriched.text)):
+                        and not internal_output(enriched.text) and question_ok):
                     result = enriched
                     log.info('回复只有附和，已补充具体信息 · %s', incoming.chat)
                 else:
@@ -2706,15 +2709,18 @@ class BotService:
                 and bare_opener(user_content)):
             address = address_name(incoming.sender, persona)
             result = LLMResult(f'{address}，{persona.get("name") or "阿洛娜"}在。'
-                               '要查资料、发链接，还是看文件或改设置？', 'fallback', 'local', 0)
-            log.info('打招呼只有客套，改为具体可做事项 · %s', incoming.chat)
+                               '需要的时候直接告诉我就好。', 'fallback', 'local', 0)
+            log.info('打招呼只有客套，改为简短说明 · %s', incoming.chat)
         explicit_repeat=bool(repeat_requested(incoming.content))
         if not requested_voice and not explicit_repeat and self._reply_recently_delivered(incoming.chat,result.text,persona):
             try:
                 updated=model_call(client,'chat','回复消息：重复回答修正',messages,
                     system+'\n最近已发送过相同回答，本轮不要原样再发。根据当前问题只补充新的信息，或明确需要补充的具体条件；不能编造新事实或换个说法敷衍。')
                 self._record_usage(updated,incoming.chat,'reply-repair')
-                if not self._reply_recently_delivered(incoming.chat,updated.text,persona):result=updated
+                updated_ok = (not content_free_reply(updated.text,names,user_content)
+                              and not question_only_reply(updated.text,names))
+                if updated_ok and not self._reply_recently_delivered(incoming.chat,updated.text,persona):
+                    result=updated
                 elif not force_reply:
                     self.emit('typing_done',{'chat':incoming.chat});return
                 else:result=replace(result,text=self._fallback_reply(incoming,persona,'thinking'))

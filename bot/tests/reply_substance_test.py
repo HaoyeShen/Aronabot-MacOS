@@ -9,7 +9,7 @@ from app.config_store import ConfigStore, PersonaStore, StickerStore
 from app.memory import MemoryStore
 from app.model_client import LLMResult
 from app.prompting import natural_dialogue_rule
-from app.reply_fallbacks import bare_opener, content_free_reply
+from app.reply_fallbacks import bare_opener, content_free_reply, question_only_reply
 from app.service import BotService
 from app.training import TrainingStore
 from app.wechat_adapter import IncomingMessage
@@ -29,6 +29,8 @@ def main():
     assert not content_free_reply('这首歌很好听。', (), '你觉得这首歌怎么样')
     assert '不要整条只有附和' in natural_dialogue_rule({'name': '阿洛娜'})
     assert bare_opener('在吗？') and not bare_opener('在吗，帮我看看文件')
+    assert question_only_reply('想查资料、看文件 还是聊点游戏？')
+    assert not question_only_reply('新闻我看过了，要总结吗？')
 
     with tempfile.TemporaryDirectory() as temp:
         root = Path(temp)
@@ -96,9 +98,24 @@ def main():
                                             {}, '', {'agent': {'status': 'completed'}})), \
                  patch('app.service.model_call', side_effect=TimeoutError('slow')):
                 service._generate_and_send(fourth, target, row4, '在吗', force_reply=True)
-            # A bare opener with no context gets concrete options instead of a
-            # generic "有什么事吗"; the forced reply is still delivered.
-            assert adapter.sent and '查资料' in ' '.join(text for _, text in adapter.sent), adapter.sent
+            # A forced @ reply is still delivered, and it does not add a
+            # proactive question when the repair is unavailable.
+            joined = ' '.join(text for _, text in adapter.sent)
+            assert adapter.sent and '？' not in joined and '在' in joined, adapter.sent
+
+            # A repair that is only a question is rejected; the bare opener
+            # gets a short statement without a proactive question.
+            adapter.sent.clear()
+            fifth = IncomingMessage('test', '小明', '在吗', chat_type='friend')
+            row5 = service._store_user(fifth, fifth.content)
+            with patch.object(service, '_model_reply',
+                              return_value=(LLMResult('小明老师，阿洛娜在哦。', 'fixture', 'openai', 1),
+                                            {}, '', {'agent': {'status': 'completed'}})), \
+                 patch('app.service.model_call',
+                       return_value=LLMResult('想查资料、看文件 还是聊点游戏？', 'fixture', 'openai', 1)):
+                service._generate_and_send(fifth, target, row5, fifth.content, force_reply=True)
+            joined = ' '.join(text for _, text in adapter.sent)
+            assert adapter.sent and '？' not in joined and '想查资料' not in joined, adapter.sent
         finally:
             service.shutdown()
             memory.close()

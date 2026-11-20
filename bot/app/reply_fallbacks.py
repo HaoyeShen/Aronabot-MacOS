@@ -106,6 +106,17 @@ _OPENER = re.compile(
     r'^\s*(?:在吗|在么|在嘛|在不在|你好|您好|嗨|哈喽|hi|hello|在|喂)[\s？?！!，,。.~～]*$', re.I)
 
 
+def question_only_reply(text, names=()):
+    """True when the reply adds nothing but a question (no statement remains)."""
+    value = str(text or '')
+    if not re.search(r'[？?]', value):
+        return False
+    clauses = re.split(r'(?<=[，,。！？!?；;])', value)
+    statements = ''.join(
+        part for part in clauses if not part.rstrip().endswith(('？', '?')))
+    return not (statements.strip() and not content_free_reply(statements, names))
+
+
 def bare_opener(text):
     """A greeting/opener that carries no topic of its own."""
     return bool(_OPENER.match(str(text or '').strip()))
