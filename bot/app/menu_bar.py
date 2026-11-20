@@ -132,4 +132,10 @@ class MenuBar:
         if self.window.quit_app() is False:
             return
         self.closed = True
+        helper = getattr(self, 'helper', None)
+        if helper is not None:
+            try:
+                helper.terminate()
+            except Exception:
+                pass
         NSStatusBar.systemStatusBar().removeStatusItem_(self.item)

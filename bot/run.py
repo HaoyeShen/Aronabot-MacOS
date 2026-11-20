@@ -1,6 +1,6 @@
 """macOS launcher for the ARONA desktop app and background native bot."""
 from __future__ import annotations
-import argparse,logging,os,sys,traceback
+import argparse,logging,os,subprocess,sys,traceback
 from pathlib import Path
 ROOT=Path(__file__).resolve().parent
 sys.path.insert(0,str(ROOT))
@@ -152,7 +152,7 @@ def main() -> int:
 
     try:
         import tkinter as tk
-        from app.paths import ASSETS
+        from app.paths import ASSETS, DATA
         from app.ui.main_window import MainWindow
 
         root = tk.Tk()
@@ -162,7 +162,30 @@ def main() -> int:
         from app.menu_bar import MenuBar
         menu_bar=MenuBar(root,window)
         from app.native_control import handle as native_control
-        instance.start(root,menu_bar.show,lambda request:native_control(service,request))
+
+        def handle_request(request):
+            command = str(request.get('command') or '')
+            if command == 'show_window':
+                root.after(0, menu_bar.show); return {'ok': True, 'result': {'shown': True}}
+            if command == 'start_bot':
+                root.after(0, menu_bar.start); return {'ok': True, 'result': {'requested': True}}
+            if command == 'stop_bot':
+                root.after(0, menu_bar.stop); return {'ok': True, 'result': {'requested': True}}
+            if command == 'quit_app':
+                root.after(0, menu_bar.quit); return {'ok': True, 'result': {'requested': True}}
+            return native_control(service, request)
+
+        instance.start(root,menu_bar.show,handle_request)
+        try:
+            helper = subprocess.Popen(
+                [sys.executable, str(ROOT/'scripts/menu_bar_helper.py'),
+                 str(DATA/'ui.sock'), str(ASSETS/'app_icon.png')],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                start_new_session=True)
+            menu_bar.helper = helper
+            logging.getLogger('arona').info('菜单栏 helper 已启动 · pid=%s', helper.pid)
+        except Exception as exc:
+            logging.getLogger('arona').warning('菜单栏 helper 启动失败：%s', type(exc).__name__)
 
         def report_callback_exception(exc_type, exc_value, exc_tb):
             detail = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))
