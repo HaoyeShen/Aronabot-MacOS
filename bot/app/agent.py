@@ -20,6 +20,7 @@ from .model_client import LLMResult
 from .web_search import SEARCH_MARKER
 from .agent_runtime import RUNTIME, current_task_id, task_entry
 from .tool_protocol import parse_action,internal_output
+from .provider_text import strip_provider_envelope
 
 # DNS/proxy resolution on Windows may outlive a socket timeout. Keep those
 # calls off the task thread and cap stranded operations across conversations.
@@ -89,7 +90,7 @@ class AgentRun:
 
 
 def _action(raw: str, *, tool_arguments=None) -> dict:
-    text = str(raw or '').strip()
+    text = strip_provider_envelope(raw).strip()
     marker = SEARCH_MARKER.fullmatch(text)
     if marker:
         return {'action': 'tool', 'tool': 'search_web', 'arguments': {'query': marker.group(1)}}

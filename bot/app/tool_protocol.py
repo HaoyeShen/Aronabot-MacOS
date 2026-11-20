@@ -3,6 +3,8 @@ import json
 import re
 from xml.etree import ElementTree
 
+from .provider_text import contains_provider_envelope, strip_provider_envelope
+
 
 _DSML_MARKER = re.compile(r'[|｜]{1,2}\s*DSML\s*[|｜]{1,2}', re.I)
 _DSML_TAG = re.compile(
@@ -11,6 +13,7 @@ _DSML_TAG = re.compile(
 
 def internal_output(text):
     value=str(text or '')
+    if contains_provider_envelope(value):return True
     return bool(_DSML_MARKER.search(value)
                 or re.search(r'<\/?(?:tool_call|function_call|function=)|\[(?:SEARCH|搜索)\s*[:：]|"action"\s*:\s*"tool"',value,re.I)
                 or re.search(r'"(?:tool|name)"\s*:\s*"(?:search_web|read_webpage|search_baike|search_knowledge|list_native_stickers|preview_native_stickers)"',value))
@@ -78,7 +81,7 @@ def _dsml_action(text, tool_arguments):
 
 
 def parse_action(raw, *, tool_arguments=None):
-    text=str(raw or '').strip()
+    text=strip_provider_envelope(raw).strip()
     if _DSML_MARKER.search(text):
         return _dsml_action(text, tool_arguments)
     wrappers=re.findall(r'<(?:tool_call|function_call)\s*>(.*?)</(?:tool_call|function_call)\s*>',text,re.I|re.S)

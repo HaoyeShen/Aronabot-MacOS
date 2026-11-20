@@ -72,6 +72,18 @@ def main():
                              result(action('search_web', 'wrong_parameter', 'topic')), result('不执行未知操作。')])
     run = AgentRunner().run(call, [], '', [AgentTool('search_web', 'query', '', tool)])
     assert not executed and all(step['status'] == 'invalid' for step in run.steps)
+    # A provider safety envelope is protocol metadata, not a reply; real tool
+    # JSON after it still executes and envelope-only output never sends.
+    leaked = ('\n\n<ds_safety>[用户未成年]否\n[分类]其他\n[判定]发送表情包\n'
+              '[规则]无</ds_safety>Safe')
+    executed.clear()
+    call = Mock(side_effect=[result(leaked), result(action('search_web', 'query', '公开主题')),
+                             result('{"action":"final","text":"找到了。"}')])
+    run = AgentRunner().run(call, [], '', [AgentTool('search_web', 'query', '', tool)])
+    assert run.status == 'completed' and run.result.text == '找到了。' and executed == ['公开主题']
+    run = AgentRunner().run(lambda *args: result(leaked), [], '', [])
+    assert run.result is None or 'ds_safety' not in run.result.text
+    executed.clear()
 
     stopped = [False]
     def cancel_during_call(*args):

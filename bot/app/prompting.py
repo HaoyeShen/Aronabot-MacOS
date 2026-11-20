@@ -670,7 +670,8 @@ def parse_reply(raw: str, stickers: list[dict], *, max_chars: int = 260,
                 allow_sticker: bool = True, persona: dict | None = None,
                 enforce_limits: bool = True) -> tuple[str, dict | None]:
     """Return clean text and an optional sticker record."""
-    text = (raw or "").strip()
+    from .provider_text import strip_provider_envelope
+    text = strip_provider_envelope(raw).strip()
     from .tool_protocol import internal_output
     if internal_output(text):return '',None
     if persona and persona.get('name'):

@@ -25,6 +25,7 @@ from typing import Any
 
 from .secretstore import unprotect
 from .model_audit import audit, audited
+from .provider_text import strip_provider_envelope
 
 log = logging.getLogger(__name__)
 
@@ -370,8 +371,14 @@ class ModelClient:
             raise ModelError(f"不支持的模型提供方：{self.provider}")
 
         text = (text or "").strip()
+        stripped = strip_provider_envelope(text)
+        envelope_only = bool(text) and not stripped
+        if stripped != text:
+            log.debug("已移除模型提供方安全分类包络 · %d 字符", len(text) - len(stripped))
+            text = stripped
         if not text:
-            raise ModelError("模型返回了空回复。", "empty content")
+            raise ModelError("模型没有给出可直接发送的回复。",
+                             "provider safety envelope only" if envelope_only else "empty content")
         latency = int((time.perf_counter() - started) * 1000)
         log.info("模型回复成功 · %s · %d ms · 尝试 %d 次", self.model, latency, attempts)
         return LLMResult(text=text, model=self.model, provider=self.provider,
@@ -556,7 +563,7 @@ class ModelClient:
                      "completion": raw_usage.get("completion_tokens", 0),**cache_usage(raw_usage)}
         else:
             raise ModelError("当前提供方不支持图片理解")
-        text = (text or "").strip()
+        text = strip_provider_envelope((text or "").strip())
         if not text:
             raise ModelError("视觉模型没有返回图片描述")
         latency = int((time.perf_counter() - started) * 1000)
