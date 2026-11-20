@@ -38,8 +38,13 @@ def main():
     assert trim_interjections('阿洛娜一直守着消息呢 嘿嘿') == '阿洛娜一直守着消息呢'
     assert trim_interjections('哈尔滨今天降温了。') == '哈尔滨今天降温了。'
     assert normalize_punctuation('A——B') == 'A B'
+    assert normalize_punctuation('https://x.test/a——b') == 'https://x.test/a——b'
     assert strip_leading_address('Harry昊昊老师 阿洛娜在', 'Harry昊昊老师',
                                  ('Harry昊昊', '老师')) == '阿洛娜在'
+    assert strip_leading_address('小明的文件已保存', '小明老师', ('小明',)) == '小明的文件已保存'
+    assert strip_questions('你想查资料，看文件，还是聊游戏？') == ''
+    assert strip_questions('已经保存，有什么要改吗') == '已经保存'
+    assert strip_questions('没什么') == '没什么'
     assert not question_only_reply('新闻我看过了，要总结吗？')
 
     with tempfile.TemporaryDirectory() as temp:

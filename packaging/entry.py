@@ -90,6 +90,10 @@ if __name__=='__main__':
     if '--web-render-worker' in sys.argv:
         from app.web_media import render_worker
         render_worker(sys.argv[-1]);sys.exit(0)
+    if '--menu-bar-helper' in sys.argv:
+        from app.menu_bar_helper import main as menu_bar_helper
+        index=sys.argv.index('--menu-bar-helper')
+        sys.exit(menu_bar_helper(sys.argv[index+1],sys.argv[index+2]))
     if '--setup' in sys.argv or (APP and '安装助手' in APP.name):setup()
     elif SDK_ONLY:
         import tkinter as tk

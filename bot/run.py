@@ -1,6 +1,6 @@
 """macOS launcher for the ARONA desktop app and background native bot."""
 from __future__ import annotations
-import argparse,logging,os,subprocess,sys,traceback
+import argparse,logging,os,subprocess,sys,threading,traceback
 from pathlib import Path
 ROOT=Path(__file__).resolve().parent
 sys.path.insert(0,str(ROOT))
@@ -122,6 +122,9 @@ def run_headless(seconds=0):
 
 
 def main() -> int:
+    if len(sys.argv) >= 4 and sys.argv[1] == '--menu-bar-helper':
+        from app.menu_bar_helper import main as helper_main
+        return helper_main(sys.argv[2], sys.argv[3])
     parser = argparse.ArgumentParser(description="什亭之匣微信助手")
     parser.add_argument("--check", action="store_true", help="run diagnostics and exit")
     parser.add_argument("--ui-smoke", action="store_true", help="build UI and close")
@@ -160,7 +163,7 @@ def main() -> int:
         root._arona_icon = icon
         window = MainWindow(root, service, icon)
         from app.menu_bar import MenuBar
-        menu_bar=MenuBar(root,window)
+        menu_bar=MenuBar(root,window,status_item=False)
         from app.native_control import handle as native_control
 
         def handle_request(request):
@@ -176,16 +179,49 @@ def main() -> int:
             return native_control(service, request)
 
         instance.start(root,menu_bar.show,handle_request)
+
+        def helper_command():
+            if getattr(sys, 'frozen', False):
+                return [sys.executable, '--menu-bar-helper',
+                        str(DATA/'ui.sock'), str(ASSETS/'app_icon.png')]
+            return [sys.executable, str(ROOT/'run.py'), '--menu-bar-helper',
+                    str(DATA/'ui.sock'), str(ASSETS/'app_icon.png')]
+
+        helper = None
         try:
             helper = subprocess.Popen(
-                [sys.executable, str(ROOT/'scripts/menu_bar_helper.py'),
-                 str(DATA/'ui.sock'), str(ASSETS/'app_icon.png')],
-                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                start_new_session=True)
-            menu_bar.helper = helper
-            logging.getLogger('arona').info('菜单栏 helper 已启动 · pid=%s', helper.pid)
+                helper_command(), stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                text=True, start_new_session=True)
+            ready = threading.Event()
+
+            def read_ready():
+                try:
+                    line = helper.stdout.readline()
+                except Exception:
+                    line = ''
+                if line.strip() == 'READY':
+                    ready.set()
+
+            threading.Thread(target=read_ready, name='arona-menu-ready', daemon=True).start()
+            if not ready.wait(5) or helper.poll() is not None:
+                logging.getLogger('arona').warning(
+                    '菜单栏 helper 未就绪（exit=%s），回退到进程内状态项', helper.poll())
+                try:
+                    helper.terminate()
+                except Exception:
+                    pass
+                helper = None
+                menu_bar.enable_status_item()
+            else:
+                menu_bar.helper = helper
+                try:
+                    helper.stdout.close()
+                except Exception:
+                    pass
+                logging.getLogger('arona').info('菜单栏 helper 已就绪 · pid=%s', helper.pid)
         except Exception as exc:
             logging.getLogger('arona').warning('菜单栏 helper 启动失败：%s', type(exc).__name__)
+            menu_bar.enable_status_item()
 
         def report_callback_exception(exc_type, exc_value, exc_tb):
             detail = "".join(traceback.format_exception(exc_type, exc_value, exc_tb))

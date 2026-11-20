@@ -16,19 +16,27 @@ class _MenuActions(NSObject):
 
 
 class MenuBar:
-    def __init__(self, root, window):
+    def __init__(self, root, window, *, status_item=True):
         self.root = root
         self.window = window
         self.service = window.service
         self.closed = False
         self._checks = 0
+        self.item = self.label = self.start_item = self.stop_item = None
         self.delegate = _MenuActions.alloc().init()
         self.delegate.controller = self
-        self._build_item()
+        if status_item:
+            self.enable_status_item()
         window.menu_bar = self
         root.createcommand('tk::mac::ReopenApplication', self.show)
         root.createcommand('tk::mac::Quit', self.quit)
         self._refresh()
+
+    def enable_status_item(self):
+        """Create the in-process status item (fallback or standalone use)."""
+        if self.item is not None or self.closed:
+            return
+        self._build_item()
         # macOS occasionally places a newly created status item off-screen
         # (x = -1) after a restart, especially when the bar is crowded.
         for delay in (800, 2500, 6000):
@@ -66,6 +74,8 @@ class MenuBar:
 
     def _placement(self):
         try:
+            if self.item is None:
+                return False, None, None
             button = self.item.button()
             window = button.window() if button is not None else None
             frame = window.frame() if window is not None else None
@@ -79,7 +89,7 @@ class MenuBar:
             return False, None, None
 
     def _ensure_visible(self):
-        if self.closed:
+        if self.closed or self.item is None:
             return
         ok, frame, screen = self._placement()
         if ok:
@@ -96,6 +106,9 @@ class MenuBar:
 
     def _refresh(self):
         if self.closed:
+            return
+        if self.item is None:
+            self.root.after(500, self._refresh)
             return
         running = self.service.running
         starting = bool(self.service.state().get('starting'))
@@ -138,4 +151,6 @@ class MenuBar:
                 helper.terminate()
             except Exception:
                 pass
-        NSStatusBar.systemStatusBar().removeStatusItem_(self.item)
+        if self.item is not None:
+            NSStatusBar.systemStatusBar().removeStatusItem_(self.item)
+            self.item = None

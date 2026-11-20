@@ -10,7 +10,22 @@ _CLOSING = '。！？!?；;，,：:、）》】」』”’)]}…'
 _OPENING = '（《【「『“‘([{'
 _CONNECTIVE = re.compile(r'不过|但是|所以|然后|而且|因为|如果|其实|另外|也可以|还可以|这样|不如|要不|至于')
 _DANGLING = re.compile(r'(?:因为|所以|但是|然后|如果|虽然|而且|或者|以及|并且|一个|这个|那个|把|被|的|地|很|太|跟|和|给|让|在|能|要)$')
-_TOKEN = re.compile(r'https?://[^\s<>"，。！？；]+|\d+(?:\.\d+)?(?:%|℃|分钟|小时|公斤|毫升|公里|个|岁|元|秒|天|年|米)|[A-Za-z0-9_]+(?:[-./:@][A-Za-z0-9_]+)*')
+_URL_PATTERN = r'https?://[^\s<>"，。！？；]+'
+_URL = re.compile(_URL_PATTERN, re.I)
+
+
+def _map_prose(text: str, transform) -> str:
+    """Apply a prose-only rewrite without modifying URL characters."""
+    parts = []
+    start = 0
+    for match in _URL.finditer(text):
+        parts.extend((transform(text[start:match.start()]), match.group()))
+        start = match.end()
+    parts.append(transform(text[start:]))
+    return ''.join(parts)
+
+
+_TOKEN = re.compile(_URL_PATTERN + r'|\d+(?:\.\d+)?(?:%|℃|分钟|小时|公斤|毫升|公里|个|岁|元|秒|天|年|米)|[A-Za-z0-9_]+(?:[-./:@][A-Za-z0-9_]+)*')
 
 
 _INTERJECT = r'(?:嘿嘿|哈哈|唔|诶|欸|嗯|哦|哈|哎|唉)'
@@ -42,10 +57,7 @@ _OFFER = re.compile(
 
 def normalize_punctuation(text):
     """Replace em/en dashes with a plain space; chat style avoids them."""
-    value = str(text or '')
-    value = re.sub(r'[\u2014\u2013]{1,}', ' ', value)
-    value = re.sub(r'[ \t]{2,}', ' ', value)
-    return value.strip()
+    return _map_prose(str(text or ''), lambda part: re.sub(r'[–—]+', ' ', part)).strip()
 
 
 def strip_leading_address(text, address, names=()):
@@ -61,8 +73,9 @@ def strip_leading_address(text, address, names=()):
     for candidate in sorted(set(candidates), key=len, reverse=True):
         if len(candidate) < 2 or not value.startswith(candidate):
             continue
-        rest = value[len(candidate):].lstrip('，,。.!！?？:：、 \t\n')
-        if rest and len(rest) <= 12:
+        suffix = value[len(candidate):]
+        rest = suffix.lstrip('，,。.!！?？:：、 \t\n')
+        if rest != suffix and rest and len(rest) <= 12:
             return rest
         break
     return value
@@ -81,26 +94,64 @@ def strip_service_offers(text: str) -> str:
     return value
 
 
-def strip_questions(text: str) -> str:
-    """Drop question clauses; this product replies with statements only.
+_QUESTION_TAIL = re.compile(
+    r'(?:好不好|行不行|可不可以|要不要|吗|嘛|(?<![什怎这那多么])么)[。！!…～~]*$')
+_QUESTION_START = re.compile(
+    r'^(?:你想|你要|你有|你能|你是|是否|要不要|想不想|要我|需要我|能不能|'
+    r'可不可以|请问|想查|想聊|想看|是.{1,24}还是)')
+_SENTENCE_SPLIT = re.compile(r'(?<=[。！？!?；;\n])')
+_CLAUSE_SPLIT = re.compile(r'(?<=[，,、：:])')
 
-    A statement that shares a sentence with a question keeps the statement
-    ("新闻我看过了，要总结吗？" -> "新闻我看过了").  A reply that is only a
-    question becomes empty so the caller can use a plain fallback.
+
+def _question_clause(clause: str) -> bool:
+    value = str(clause or '').strip()
+    if not value:
+        return False
+    if value.rstrip().endswith(('？', '?')):
+        return True
+    return bool(_QUESTION_TAIL.search(value.rstrip('。！!…～~ \t')))
+
+
+def strip_questions(text: str) -> str:
+    """Drop question sentences/clauses; replies use statements only.
+
+    A statement before a question keeps its text ("新闻我看过了，要总结吗？"
+    becomes "新闻我看过了").  A sentence that starts as a question, including
+    comma-separated option lists such as "你想查资料，看文件，还是聊游戏？",
+    is removed as a whole so no half question is sent.
     """
     value = str(text or '').strip()
-    if not value or not re.search(r'[？?]', value):
+    if not value:
         return value
-    # Never treat a URL query string as a question clause.
+    # Never treat a URL query string or dash as a question clause.
     protected = {}
     def hide(match):
         key = '\x00%d\x00' % len(protected)
         protected[key] = match.group(0)
         return key
-    value = re.sub(r'https?://[^\s，。！；]+', hide, value)
-    clauses = re.split(r'(?<=[，,。！？!?；;\n])', value)
-    kept = [part for part in clauses
-            if part.strip() and not part.rstrip().endswith(('？', '?'))]
+    value = _URL.sub(hide, value)
+    kept = []
+    for sentence in _SENTENCE_SPLIT.split(value):
+        if not sentence:
+            continue
+        if not sentence.strip():
+            # Preserve intentional line breaks/blank lines between bubbles.
+            kept.append(sentence)
+            continue
+        clauses = _CLAUSE_SPLIT.split(sentence)
+        question_at = next((index for index, clause in enumerate(clauses)
+                            if _question_clause(clause)), None)
+        if question_at is None:
+            kept.append(sentence)
+            continue
+        first = clauses[0].strip()
+        if question_at == 0 or (_QUESTION_START.match(first) and
+                                ('还是' in sentence or sentence.rstrip().endswith(('？', '?')))):
+            # The whole sentence is the question/option list.
+            continue
+        prefix = ''.join(clauses[:question_at]).strip()
+        if prefix:
+            kept.append(prefix)
     value = ''.join(kept).strip()
     value = re.sub(r'[，,、；;：:\s]+$', '', value).strip()
     value = value.replace('？', '').replace('?', '').strip()
