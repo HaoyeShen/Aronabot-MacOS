@@ -186,6 +186,16 @@ def main():
             joined = ' '.join(text for _, text in adapter.sent)
             assert joined.startswith('改好了') and '小明老师' not in joined, adapter.sent
 
+            # Model line breaks are respected and a proper name is not cut in
+            # half; a trailing comma is not left dangling in a bubble.
+            sample = ('在的\n\n视频号这边阿洛娜只看得到标题，猜是才羽桃井的整活剪辑'
+                      '——冻牛奶切刀听着就很游戏开发部')
+            bubbles = service._split_reply_messages(sample, [], False, 30, 30)
+            assert bubbles[0] == '在的', bubbles
+            assert any('才羽桃井' in part for part in bubbles), bubbles
+            assert not any(part.startswith('羽桃井') for part in bubbles), bubbles
+            assert not any(part.endswith(('，', ',')) for part in bubbles), bubbles
+
             # Short replies use at most two bubbles; longer information may use more.
             short_bubbles = service._split_reply_messages('一'*20 + '，' + '二'*20, [], False, 25, 25)
             assert short_bubbles and len(short_bubbles) <= 2, short_bubbles

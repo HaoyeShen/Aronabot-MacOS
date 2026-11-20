@@ -5,7 +5,7 @@ import re
 import unicodedata
 
 
-_PAUSES = '。！？!?；;，,：:'
+_PAUSES = '。！？!?；;，,：:—…'
 _CLOSING = '。！？!?；;，,：:、）》】」』”’)]}…'
 _OPENING = '（《【「『“‘([{'
 _CONNECTIVE = re.compile(r'不过|但是|所以|然后|而且|因为|如果|其实|另外|也可以|还可以|这样|不如|要不|至于')
@@ -38,6 +38,14 @@ _OFFER = re.compile(
     r'(?:跟我说|告诉阿洛娜|交给阿洛娜|找阿洛娜|交给我)'
     r'|交给我吧|需要的时候(?:直接)?(?:告诉|找)我|随时(?:可以)?(?:找我|告诉我)'
     r'|我来帮你|有需要(?:随时)?(?:告诉|找)我|尽管(?:交给|告诉)我|我帮你(?:看看|处理|改|弄)?吧)')
+
+
+def normalize_punctuation(text):
+    """Replace em/en dashes with a plain space; chat style avoids them."""
+    value = str(text or '')
+    value = re.sub(r'[\u2014\u2013]{1,}', ' ', value)
+    value = re.sub(r'[ \t]{2,}', ' ', value)
+    return value.strip()
 
 
 def strip_leading_address(text, address, names=()):
@@ -117,10 +125,14 @@ def split_chat_bubbles(text: str, limit: int, max_bubbles: int,
         return []
     if sum(len(p) for p in paragraphs) > limit * max_bubbles:
         return []
-    # A lone address or acknowledgement belongs with the next thought, even
-    # when the model happens to put it on its own line.
+    # Only dangling connectors/addresses merge with the next line.  A short
+    # complete answer such as "在的" must keep its own bubble; merging it with
+    # the explanation produced "在的视频号……" fragments.
+    joinable = {'老师', '嗯', '唔', '诶', '那个', '然后', '所以', '但是',
+                '不过', '而且', '还有', '这', '那', '就', '也'}
     for index in range(len(paragraphs)-2,-1,-1):
-        if (allow_soft_split and len(paragraphs[index]) < 6
+        if (allow_soft_split
+                and paragraphs[index].strip('，,。.!！、：: ') in joinable
                 and not paragraphs[index].endswith(('？','?'))):
             paragraphs[index:index+2] = [''.join(paragraphs[index:index+2])]
     output = []
@@ -137,6 +149,9 @@ def split_chat_bubbles(text: str, limit: int, max_bubbles: int,
         blocked = set()
         for token in _TOKEN.finditer(paragraph):
             blocked.update(range(token.start()+1,token.end()))
+        # A dash pair is one pause; never split between its two characters.
+        for match in re.finditer(r'—{2,}', paragraph):
+            blocked.update(range(match.start()+1,match.end()))
         for i in range(1,n):
             if (paragraph[i] in _CLOSING or paragraph[i-1] in _OPENING
                     or unicodedata.combining(paragraph[i])
@@ -150,8 +165,12 @@ def split_chat_bubbles(text: str, limit: int, max_bubbles: int,
             previous = paragraph[:end].rstrip('）》】」』”’)]}')[-1:]
             if end == n or previous in '。！？!?；;':
                 penalty = 0
-            elif previous in _PAUSES:
-                penalty = 3
+            elif previous in '—…':
+                penalty = 2
+            elif previous in '，,：:':
+                # Ending a bubble on a comma leaves a dangling clause; prefer
+                # a dash/sentence end, but still better than cutting a word.
+                penalty = 12
             elif allow_soft_split:
                 penalty = 5 if previous.isspace() or end in connective else 24
             else:
