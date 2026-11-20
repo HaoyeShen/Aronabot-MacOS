@@ -33,13 +33,14 @@ with tempfile.TemporaryDirectory() as tmp:
            'sender':'wxid_friend','text':'@ARONA 在吗','message_type':1,'direction':'incoming'}
     memory.add_user('test', '旧消息', sender='群友', external_id='wxdb:room@chatroom:message_0.db:11')
     try:
+        concrete = '在的，刚看完那份文件，有两处要改。'
         with patch('app.service.make_client') as client:
-            client.return_value.chat.return_value = LLMResult('我在呀。', 'fixture', 'mock', 1)
+            client.return_value.chat.return_value = LLMResult(concrete, 'fixture', 'mock', 1)
             incoming = mapper._map_message(row, target)
             import time
             incoming.received_at = time.time()
             service._handle_incoming(incoming)
-            assert fake.sent == [('test', '我在呀。')]
+            assert fake.sent == [('test', concrete)]
             service._handle_incoming(incoming)
             assert len(fake.sent) == 1, 'same event must not reply twice'
             newer = mapper._map_message({**row, 'message_id':'201', 'timestamp':1700200000}, target)

@@ -9,7 +9,7 @@ from app.config_store import ConfigStore, PersonaStore, StickerStore
 from app.memory import MemoryStore
 from app.model_client import LLMResult
 from app.prompting import natural_dialogue_rule
-from app.reply_fallbacks import content_free_reply
+from app.reply_fallbacks import bare_opener, content_free_reply
 from app.service import BotService
 from app.training import TrainingStore
 from app.wechat_adapter import IncomingMessage
@@ -24,8 +24,11 @@ def main():
     assert not content_free_reply('先备份 config.json，再改 active_profile_id。')
     assert not content_free_reply('今天是晴天呀。')
     assert content_free_reply('数学考试确实难。', (), '今天数学考试好难')
+    assert content_free_reply('Harry昊昊老师 阿洛娜在哦 今天有什么想聊的？', ('Harry昊昊','阿洛娜'), '在吗')
+    assert not content_free_reply('阿洛娜在哦 想查资料、看文件，还是聊点游戏？', ('阿洛娜',), '在吗')
     assert not content_free_reply('这首歌很好听。', (), '你觉得这首歌怎么样')
     assert '不要整条只有附和' in natural_dialogue_rule({'name': '阿洛娜'})
+    assert bare_opener('在吗？') and not bare_opener('在吗，帮我看看文件')
 
     with tempfile.TemporaryDirectory() as temp:
         root = Path(temp)
@@ -74,13 +77,28 @@ def main():
 
             # A repair that is still filler keeps the original instead of losing the reply.
             adapter.sent.clear()
-            third = IncomingMessage('test', '小明', '在吗', chat_type='friend')
+            third = IncomingMessage('test', '小明', '今天数学考试好难', chat_type='friend')
             row3 = service._store_user(third, third.content)
-            with patch.object(service, '_model_reply',
-                              return_value=(LLMResult(filler[0], 'fixture', 'openai', 1), *filler[1:])), \
+            echo = (LLMResult('数学考试确实难。', 'fixture', 'openai', 1), {}, '',
+                    {'agent': {'status': 'completed'}})
+            with patch.object(service, '_model_reply', return_value=echo), \
                  patch('app.service.model_call', return_value=LLMResult('嗯嗯，我在呢。', 'fixture', 'openai', 1)):
                 service._generate_and_send(third, target, row3, third.content, force_reply=True)
-            assert any('一直都在' in text for _, text in adapter.sent), adapter.sent
+            assert any('数学考试确实难' in text for _, text in adapter.sent), adapter.sent
+
+            # A forced @/keyword reply still goes out when the optional
+            # substance repair fails; it must never suppress the reply.
+            adapter.sent.clear()
+            fourth = IncomingMessage('test', '小明', '@阿洛娜 在吗', chat_type='group', mentions_self=True)
+            row4 = service._store_user(fourth, fourth.content)
+            with patch.object(service, '_model_reply',
+                              return_value=(LLMResult('小明老师，阿洛娜在哦，有事吗？', 'fixture', 'openai', 1),
+                                            {}, '', {'agent': {'status': 'completed'}})), \
+                 patch('app.service.model_call', side_effect=TimeoutError('slow')):
+                service._generate_and_send(fourth, target, row4, '在吗', force_reply=True)
+            # A bare opener with no context gets concrete options instead of a
+            # generic "有什么事吗"; the forced reply is still delivered.
+            assert adapter.sent and '查资料' in ' '.join(text for _, text in adapter.sent), adapter.sent
         finally:
             service.shutdown()
             memory.close()
