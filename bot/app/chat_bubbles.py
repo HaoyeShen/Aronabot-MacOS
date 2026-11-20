@@ -13,6 +13,54 @@ _DANGLING = re.compile(r'(?:因为|所以|但是|然后|如果|虽然|而且|或
 _TOKEN = re.compile(r'https?://[^\s<>"，。！？；]+|\d+(?:\.\d+)?(?:%|℃|分钟|小时|公斤|毫升|公里|个|岁|元|秒|天|年|米)|[A-Za-z0-9_]+(?:[-./:@][A-Za-z0-9_]+)*')
 
 
+_INTERJECT = r'(?:嘿嘿|哈哈|唔|诶|欸|嗯|哦|哈|哎|唉)'
+
+
+def trim_interjections(text: str) -> str:
+    """Drop leading/trailing filler interjections such as "嘿嘿" or "唔".
+
+    Only standalone interjections at clause boundaries are removed, so a name
+    like "哈尔滨" or an interjection inside a sentence is left alone.
+    """
+    value = str(text or '').strip()
+    if not value:
+        return value
+    value = re.sub(
+        rf'^(?:(?:{_INTERJECT})(?:[，,。.!！、\s]*(?:{_INTERJECT}))*)'
+        rf'(?=[，,。.!！、\s]|$)[，,。.!！、\s]*', '', value)
+    value = re.sub(rf'[，,。.!！、\s]*(?:{_INTERJECT})[。.!！~～\s]*$', '', value)
+    value = re.sub(rf'[，,。.!！、]\s*(?:{_INTERJECT})\s*(?=[，,。.!！、]|$)', '', value)
+    return value.strip()
+
+
+def strip_questions(text: str) -> str:
+    """Drop question clauses; this product replies with statements only.
+
+    A statement that shares a sentence with a question keeps the statement
+    ("新闻我看过了，要总结吗？" -> "新闻我看过了").  A reply that is only a
+    question becomes empty so the caller can use a plain fallback.
+    """
+    value = str(text or '').strip()
+    if not value or not re.search(r'[？?]', value):
+        return value
+    # Never treat a URL query string as a question clause.
+    protected = {}
+    def hide(match):
+        key = '\x00%d\x00' % len(protected)
+        protected[key] = match.group(0)
+        return key
+    value = re.sub(r'https?://[^\s，。！；]+', hide, value)
+    clauses = re.split(r'(?<=[，,。！？!?；;\n])', value)
+    kept = [part for part in clauses
+            if part.strip() and not part.rstrip().endswith(('？', '?'))]
+    value = ''.join(kept).strip()
+    value = re.sub(r'[，,、；;：:\s]+$', '', value).strip()
+    value = value.replace('？', '').replace('?', '').strip()
+    for key, token in protected.items():
+        value = value.replace(key, token)
+    return value
+
+
 def split_chat_bubbles(text: str, limit: int, max_bubbles: int,
                        *, allow_soft_split: bool = True) -> list[str]:
     """Keep model line breaks; balance punctuation, clause pauses and short tails.

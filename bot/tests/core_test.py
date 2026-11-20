@@ -206,7 +206,7 @@ def test_prompt_and_stickers() -> None:
                 "bare sticker + Chinese annotation selects sticker")
     assert_true(f"[{first_name}]" not in annotated_text and "同时发送" not in annotated_text,
                 "sticker/annotation removed from text")
-    assert_true(annotated_text.startswith("嘿嘿，阿洛娜好开心"),
+    assert_true(annotated_text.startswith("阿洛娜好开心"),
                 "self-reference fixed together with sticker")
     bare_text, bare_sticker = parse_reply(f"老师，阿洛娜在哦～[{first_name}]", stickers)
     assert_true(bare_sticker and bare_sticker["name"] == first_name,

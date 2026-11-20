@@ -20,7 +20,7 @@ def main():
     normal=build_system_prompt(ARONA_PERSONA,[],recipient_name='甲')
     assert '13. 说人话' in legacy and '13. 说人话' not in normal
     assert '先给明确的结论' in legacy and '先给明确的结论' in normal
-    assert '语气词能省则省' in build_compact_system_prompt(ARONA_PERSONA,[],legacy=True)
+    assert '一条回复最多保留一个' in build_compact_system_prompt(ARONA_PERSONA,[],legacy=True)
     runtime=AgentRuntime();seen=[]
     transcript=[{'role':'user' if i%2==0 else 'assistant','content':str(i)+' 完整历史'} for i in range(30)]
     client=SimpleNamespace(effort='high_consumption',model='fixture',api_key='')

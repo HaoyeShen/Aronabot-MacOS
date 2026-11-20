@@ -69,7 +69,7 @@ def main():
             with patch('app.model_requested_share.model_call',model), patch(
                     'app.model_requested_share.collect_shares',return_value=candidates) as lookup:
                 service._handle_incoming(incoming('给我推荐一个视频吧',1))
-                assert '什么主题' in adapter.sent[-1][1]
+                assert '说一下想看的' in adapter.sent[-1][1] and '？' not in adapter.sent[-1][1]
                 service._handle_incoming(incoming('蔚蓝档案',2,'另一人'))
                 assert model.call_count == 1 and not lookup.called
                 item = incoming('蔚蓝档案',3)

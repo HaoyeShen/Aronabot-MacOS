@@ -5,6 +5,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from app.chat_bubbles import strip_questions, trim_interjections
 from app.config_store import ConfigStore, PersonaStore, StickerStore
 from app.memory import MemoryStore
 from app.model_client import LLMResult
@@ -30,6 +31,11 @@ def main():
     assert '不要整条只有附和' in natural_dialogue_rule({'name': '阿洛娜'})
     assert bare_opener('在吗？') and not bare_opener('在吗，帮我看看文件')
     assert question_only_reply('想查资料、看文件 还是聊点游戏？')
+    assert strip_questions('新闻我看过了，需要总结吗？') == '新闻我看过了'
+    assert strip_questions('文档：https://example.com/a?x=1') == '文档：https://example.com/a?x=1'
+    assert trim_interjections('嘿嘿，交给我吧。') == '交给我吧。'
+    assert trim_interjections('阿洛娜一直守着消息呢 嘿嘿') == '阿洛娜一直守着消息呢'
+    assert trim_interjections('哈尔滨今天降温了。') == '哈尔滨今天降温了。'
     assert not question_only_reply('新闻我看过了，要总结吗？')
 
     with tempfile.TemporaryDirectory() as temp:
@@ -116,6 +122,37 @@ def main():
                 service._generate_and_send(fifth, target, row5, fifth.content, force_reply=True)
             joined = ' '.join(text for _, text in adapter.sent)
             assert adapter.sent and '？' not in joined and '想查资料' not in joined, adapter.sent
+
+            # A statement plus a clarifying question keeps the statement only.
+            adapter.sent.clear()
+            sixth = IncomingMessage('test', '小明', '今天数学考试好难', chat_type='friend')
+            row6 = service._store_user(sixth, sixth.content)
+            with patch.object(service, '_model_reply',
+                              return_value=(LLMResult('数学考试确实难，是哪部分卡住了？',
+                                                      'fixture', 'openai', 1),
+                                            {}, '', {'agent': {'status': 'completed'}})):
+                service._generate_and_send(sixth, target, row6, sixth.content, force_reply=True)
+            joined = ' '.join(text for _, text in adapter.sent)
+            assert joined and '？' not in joined and '数学考试确实难' in joined, adapter.sent
+
+            # Filler interjections at the edges are removed before sending.
+            adapter.sent.clear()
+            seventh = IncomingMessage('test', '小明', '今天数学考试好难', chat_type='friend')
+            row7 = service._store_user(seventh, seventh.content)
+            with patch.object(service, '_model_reply',
+                              return_value=(LLMResult('嘿嘿，数学考试确实难，先缓一缓。',
+                                                      'fixture', 'openai', 1),
+                                            {}, '', {'agent': {'status': 'completed'}})):
+                service._generate_and_send(seventh, target, row7, seventh.content, force_reply=True)
+            joined = ' '.join(text for _, text in adapter.sent)
+            assert joined and '嘿嘿' not in joined and '数学考试确实难' in joined, adapter.sent
+
+            # Short replies use at most two bubbles; longer information may use more.
+            short_bubbles = service._split_reply_messages('一'*20 + '，' + '二'*20, [], False, 25, 25)
+            assert short_bubbles and len(short_bubbles) <= 2, short_bubbles
+            long_bubbles = service._split_reply_messages(
+                '一'*20 + '，' + '二'*20 + '，' + '三'*20 + '，' + '四'*20, [], False, 25, 25)
+            assert len(long_bubbles) <= 4, long_bubbles
         finally:
             service.shutdown()
             memory.close()
