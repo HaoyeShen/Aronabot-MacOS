@@ -76,7 +76,7 @@ class SettingsPage(BasePage):
         diary.pack(fill='x',pady=(px(12),0))
         SectionHeading(diary.body,'阿洛娜的今日日记','每天回顾自己的活动，发布到朋友圈').pack(fill='x',pady=(0,px(8)))
         self.diary_enabled=self._var('diary_enabled',self.config.bot.get('diary_enabled',True),tk.BooleanVar)
-        ToggleRow(diary.body,'自动发布今日日记',self.diary_enabled,'程序运行并连接微信时生效；默认北京时间22:00').pack(fill='x')
+        ToggleRow(diary.body,'自动发布今日日记',self.diary_enabled,'北京时间；运行期间防止空闲睡眠，合盖休眠或断网后可补发最近24小时的日记。').pack(fill='x')
         self.diary_sticker=self._var('diary_sticker',self.config.bot.get('diary_attach_sticker',True),tk.BooleanVar)
         ToggleRow(diary.body,'附上一张内置表情包',self.diary_sticker,'仅使用内置图片，不上传私人导入图片').pack(fill='x')
         self.diary_time=LabeledEntry(diary.body,'发布时间（北京时间）',self.config.bot.get('diary_time','22:00'),hint='HH:MM',width=8)

@@ -2,7 +2,7 @@
 import sys,tempfile,json
 from pathlib import Path
 from types import SimpleNamespace
-from datetime import datetime
+from datetime import datetime,timedelta
 from unittest.mock import Mock,patch
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
 from app.diary import DailyDiary,CHINA
@@ -49,12 +49,30 @@ def main():
                 other.tick(now);other.retry_after=0;other.tick(now)
                 assert adapter.publish_moment.call_count==2
                 assert other.load()[now.date().isoformat()]['status']=='uncertain'
+            # Arm the schedule before 22:00, then resume the next morning
+            # with the cloud unavailable and ordinary replies still queued.
+            adapter.publish_moment.reset_mock()
+            adapter.publish_moment.return_value=SendResult(True,'服务器已确认',metadata={'post':{'post_id':'123'}})
+            overnight=DailyDiary(service,root/'overnight.json')
+            dawn=now+timedelta(hours=8)
+            service._reply_busy=True
+            with patch('app.diary.make_client',side_effect=ConnectionError('offline')):
+                assert overnight.tick(now-timedelta(minutes=1)) is None
+                assert overnight.tick(dawn)['ok']
+                assert overnight.load()[now.date().isoformat()]['post_id']=='123'
+                assert adapter.publish_moment.call_args.args[0].startswith(f'【阿洛娜的今日日记 · {now.date()}】')
+                assert overnight.tick(dawn)['already_published']
+                assert adapter.publish_moment.call_count==1
+            service._reply_busy=False
+            first_install=DailyDiary(service,root/'new.json')
+            assert first_install.tick(dawn) is None
+            adapter.publish_moment.reset_mock()
             manual=DailyDiary(service,root/'manual.json');cfg.bot['diary_enabled']=False
             adapter.publish_moment.return_value=SendResult(True,'手动日记已发布')
             with patch('app.diary.make_client',return_value=fake),patch('app.diary.diary_now',return_value=now.replace(hour=10)):
                 result=manual.publish_now()
-                assert result['ok'] and adapter.publish_moment.call_count==3,'manual button bypasses time/automatic switch'
-                assert manual.publish_now()['already_published'] and adapter.publish_moment.call_count==3
+                assert result['ok'] and adapter.publish_moment.call_count==1,'manual button bypasses time/automatic switch'
+                assert manual.publish_now()['already_published'] and adapter.publish_moment.call_count==1
         finally:memory.close()
     print('DIARY TEST PASSED')
 

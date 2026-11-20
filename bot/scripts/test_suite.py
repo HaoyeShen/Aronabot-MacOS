@@ -16,6 +16,15 @@ def fixture_dns(host,port,*args,**kwargs):
     if host=='localhost':return resolver(host,port,*args,**kwargs)
     return [(socket.AF_INET,socket.SOCK_STREAM,socket.IPPROTO_TCP,'',('93.184.216.34',port))]
 socket.getaddrinfo=fixture_dns
+# Offline suites must never wait on a real outbound socket.  A test that
+# forgets to stub a network call now fails immediately instead of hanging
+# until the 120s watchdog (seen with a duplicate-reply repair call).
+real_connect=socket.create_connection
+def offline_connect(address,*args,**kwargs):
+    host=address[0] if isinstance(address,tuple) else str(address)
+    if host in ('127.0.0.1','::1','localhost'):return real_connect(address,*args,**kwargs)
+    raise ConnectionRefusedError('outbound network disabled in offline tests: %s' % (host,))
+socket.create_connection=offline_connect
 from app import secretstore
 class MemoryKeys:
     values={}

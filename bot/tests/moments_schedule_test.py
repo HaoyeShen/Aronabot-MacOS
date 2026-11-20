@@ -6,10 +6,10 @@ from app.moments_reader import MomentsReader
 import time
 
 def main():
- diary=SimpleNamespace(tick=Mock(side_effect=RuntimeError('fixture diary failure')))
+ diary=SimpleNamespace(tick=Mock())
  reader=SimpleNamespace(tick=Mock())
  s=SimpleNamespace(diary=diary,moments_reader=reader)
- BotService._moments_tick(s);reader.tick.assert_called_once()
+ BotService._moments_tick(s);reader.tick.assert_called_once();diary.tick.assert_not_called()
  event=Mock();event.is_set.return_value=False;event.wait.return_value=True
  tick=Mock();loop=SimpleNamespace(_running=True,_stop_event=event,_moments_tick=tick)
  BotService._moments_loop(loop)

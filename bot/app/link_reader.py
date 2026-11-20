@@ -34,7 +34,8 @@ class _Redirect(urllib.request.HTTPRedirectHandler):
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
-def fetch_public(url: str, *, image: bool = False, timeout: float = 6) -> tuple[bytes, str]:
+def fetch_public(url: str, *, image: bool = False, timeout: float = 6,
+                 include_final_url: bool = False):
     validate_url(url)
     request = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 ARONA/1.2"})
     # No proxy credentials or browser cookies are inherited.
@@ -58,7 +59,8 @@ def fetch_public(url: str, *, image: bool = False, timeout: float = 6) -> tuple[
             raise ValueError("不支持的网页压缩格式")
         if len(data) > cap:
             raise ValueError("解压后的网页过大")
-        return data, response.headers.get_content_charset() or "utf-8"
+        resource = (data, response.headers.get_content_charset() or "utf-8")
+        return (*resource, response.geturl()) if include_final_url else resource
 
 
 class PageText(HTMLParser):

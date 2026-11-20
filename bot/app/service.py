@@ -105,6 +105,7 @@ class BotService:
         self.events: queue.Queue[tuple[str, dict]] = queue.Queue()
         self._incoming: queue.Queue[IncomingMessage | None] = queue.Queue()
         self._stop_event = threading.Event()
+        self._diary_stop = threading.Event()
         self._worker: threading.Thread | None = None
         self._supervisor: threading.Thread | None = None
         self._adapter: BaseWeChatAdapter | None = None
@@ -271,6 +272,9 @@ class BotService:
                              daemon=True).start()
             threading.Thread(target=self._moments_loop, name="arona-moments",
                              daemon=True).start()
+            self._diary_stop=threading.Event()
+            threading.Thread(target=self.diary.run_schedule,args=(self._diary_stop,),
+                             name="arona-diary",daemon=True).start()
             self._idle_stop = threading.Event()
             threading.Thread(target=self._idle_loop, args=(self._idle_stop,),
                              name="arona-idle-chat", daemon=True).start()
@@ -351,6 +355,7 @@ class BotService:
 
     def stop(self, join_timeout: float = 5.0) -> None:
         self._running = False
+        self._diary_stop.set()
         close_character_voice()
         self._idle_stop.set()
         with self._idle_lock:
@@ -1157,6 +1162,13 @@ class BotService:
         names = self._role_names(incoming.chat) + ['阿洛娜', 'Arona']
         self_name = self._adapter.self_name if self._adapter else ''
         group_at_me = incoming.mentions_self or at_mentioned(raw_content, self_name, names)
+        if msg_type in ('text', 'quote') and (
+                not incoming.is_group or group_at_me or group_audience(raw_content, [*names,self_name]) != 'OTHER'):
+            from .model_requested_share import share_context, share_intent
+            history, pending = share_context(incoming,row_id,self.memory.recent(incoming.chat,16))
+            hint, possible = share_intent(raw_content,(*names,self_name),pending)
+            if possible and self._send_requested_share(incoming,row_id,hint,history,pending):
+                return
         trigger_words = self.config.bot.get('trigger_keywords') or []
         keyword_hit = bool(self.config.bot.get('trigger_enabled', True) and msg_type in ('text', 'quote')
             and any(str(word).strip() and str(word).strip().casefold() in raw_content.casefold()
@@ -1312,6 +1324,88 @@ class BotService:
         else:
             log.info("记录出站消息（老师本人手动） · %s · 发送者=%s · 内容已隐藏",
                      incoming.chat, sender)
+
+    @fresh_reply
+    def _send_requested_share(self, incoming, row_id, hint, history, pending):
+        from .requested_share import LABELS
+        from .model_requested_share import ModelRequestedShare
+        adapter = self.adapter
+        if not adapter or not adapter.connected:
+            return
+        chat = incoming.chat
+        receiver = adapter.chat_identity(chat)
+        if not receiver:
+            return
+
+        def cancelled():
+            target = self.config.target_by_name(chat)
+            return (not self._running or self._adapter is not adapter or not adapter.connected
+                    or not reply_current() or not RUNTIME.session_current()
+                    or not target or not target.get('enabled')
+                    or not self.config.bot.get('auto_reply', True)
+                    or self._is_muted(chat) or self._in_quiet_hours())
+
+        if cancelled():
+            return
+        self.emit('typing', {'chat': chat})
+        try:
+            search_enabled = bool(self.config.bot.get('web_search_enabled',True))
+            agent = ModelRequestedShare(self.config.active_profile(),
+                lambda result:self._record_usage(result,chat,'requested-share'))
+            def find():
+                return agent.run(incoming.content,history,pending,hint,(incoming.sender,chat),
+                                 search_enabled=search_enabled,cancelled=cancelled)
+            state, found = _bounded(find,time.monotonic()+36,cancelled)
+            if state == 'cancelled':
+                return True
+            if state == 'ok' and found is None:
+                return False
+            if state != 'ok':
+                log.info('请求推送模型未完成 · %s · %s',state,type(found).__name__)
+                if not hint and not pending:
+                    return False
+                kind, status, candidate = (hint.kind if hint else pending), 'unavailable', None
+            else:
+                kind, status, candidate = found
+            label = LABELS[kind]
+            if candidate:
+                title = candidate.title
+                if kind == 'news' and candidate.date:
+                    title += f'（{candidate.date}）'
+                if candidate.indexed:
+                    title += '（公众号页面可能需要微信验证）'
+                message = f'{title}\n{candidate.url}'
+            elif status == 'awaiting_topic':
+                message = f'想看什么主题的{label}？说一下主题或名称吧。'
+            elif status == 'disabled':
+                message = '当前关闭了联网检索，暂时无法核对链接。'
+            elif status == 'unavailable':
+                message = '模型暂时没能完成链接搜索，请稍后再试。'
+            elif status == 'cancelled':
+                return True
+            else:
+                message = f'模型这次没选到符合要求的{label}链接。'
+            with self._adapter_lock:
+                if (cancelled() or adapter.chat_identity(chat) != receiver
+                        or (candidate and not self.config.bot.get('web_search_enabled',True))):
+                    return True
+                result = adapter.send_text(chat, message)
+            if result.ok:
+                self._remember_bot_sent(chat, message)
+                self.memory.add_assistant(chat, message, reply_to=row_id,
+                                          meta={'requested_share': kind, 'share_status': status,
+                                                'link_evidence': ('index' if candidate.indexed else 'page') if candidate else ''})
+                self._last_reply_at[chat] = self._global_last_reply = time.time()
+                self._stats = self.memory.stats()
+                self._update(replies=self._state.get('replies', 0) + 1, last_reply_at=time.time())
+                self.emit('reply', {'chat': chat, 'text': message, 'provider': 'requested-share',
+                                    'time': datetime.now().strftime('%H:%M:%S')})
+                log.info('请求推送 · %s · %s', kind, '链接已确认发送' if candidate else status)
+            else:
+                self.emit('error', {'message': '链接请求回复结果：' + result.message})
+        finally:
+            self.emit('typing_done', {'chat': chat})
+        return True
 
     def _training_context(self, text: str, history: list[dict] | None = None,
                           target_type: str = "friend") -> tuple[str, int, dict]:
@@ -1479,34 +1573,46 @@ class BotService:
             self._background_health = {'signature': self._background_signature(profile),
                                        'failures': 0, 'retry_after': 0.0}
 
-    def _background_chat(self, profile, messages, system, *, purpose='后台任务'):
-        """One low-priority request; failures pause both summaries and shares."""
+    def _background_chat(self, profile, messages, system, *, purpose='后台任务', timeout=20):
+        """One low-priority request; failures pause both summaries and shares.
+
+        Most background work is a short decision that should fail fast, so the
+        default budget stays at 20s.  Context summaries merge the previous
+        summary with up to 12k characters of new transcript; at peak hours the
+        provider has needed more than 20s for that same request while it
+        normally finishes in 5-15s.  The caller passes a larger budget instead
+        of failing repeatedly and backing off the shared background health for
+        up to ten minutes.  A timeout from the HTTP layer is reported as a
+        timeout even though the worker raises ModelError first.
+        """
         if self._reply_busy or not self._incoming.empty() or not self._background_ready(profile):
             return None
+        budget = min(max(5, int(timeout)), max(5, int(profile.get('timeout', timeout) or timeout)))
         bounded_profile = dict(profile)
-        bounded_profile['timeout'] = min(20, max(5, int(profile.get('timeout', 20) or 20)))
+        bounded_profile['timeout'] = budget
 
         def work():
             if self._reply_busy or not self._incoming.empty() or self._stop_event.is_set():
                 return None
             return self._simple_model_chat(bounded_profile,messages,system,purpose=purpose)
 
-        operation, result = _bounded(work, time.monotonic() + 20,
+        operation, result = _bounded(work, time.monotonic() + budget + 2,
                                      self._stop_event.is_set, self._background_model_lock)
         if operation in ('busy', 'cancelled') or (operation == 'ok' and result is None):
             return None
         if operation == 'ok':
             self._background_recovered(profile)
             return result
+        message = getattr(result, 'message', '') if operation == 'error' else ''
+        timed_out = operation == 'timeout' or (operation == 'error' and '超时' in message)
         with self._state_lock:
             if self._background_health['signature'] != self._background_signature(profile):
                 return None
             self._background_health['failures'] += 1
             delay = min(600, 60 * 2 ** min(4, self._background_health['failures'] - 1))
             self._background_health['retry_after'] = time.monotonic() + delay
-        message = getattr(result, 'message', '') if operation == 'error' else ''
         code = re.search(r'HTTP\s*\d{3}', message)
-        reason = code.group() if code else ('请求超时' if operation == 'timeout' else type(result).__name__)
+        reason = code.group() if code else ('请求超时' if timed_out else type(result).__name__)
         log.warning('模型接口暂不可用（%s），摘要与主动分享暂停 %d 秒；用户消息仍可请求模型。', reason, delay)
         return None
 
@@ -1522,10 +1628,8 @@ class BotService:
                 log.debug("基沃托斯新闻定时检查失败：%s", exc)
 
     def _moments_tick(self):
-        # A slow news fetch or a failed diary must not suppress comments.
-        for name,job in (('今日日记',self.diary),('朋友圈评论',self.moments_reader)):
-            try:job.tick()
-            except Exception as exc:log.warning('%s调度异常：%s',name,type(exc).__name__)
+        try:self.moments_reader.tick()
+        except Exception as exc:log.warning('朋友圈评论调度异常：%s',type(exc).__name__)
 
     def _moments_loop(self):
         # Check overdue work immediately on connection/reconnection.
@@ -1715,7 +1819,8 @@ class BotService:
             prompt = ("已有摘要：\n" + (old_summary or "（无）") +
                       "\n\n需要合并的新对话：\n" + transcript +
                       f"\n\n请合并为不超过 {max_chars} 字的中文摘要。")
-            result = self._background_chat(profile, [{"role": "user", "content": prompt}], system, purpose="上下文摘要")
+            result = self._background_chat(profile, [{"role": "user", "content": prompt}], system,
+                                           purpose="上下文摘要", timeout=35)
             if result is None or not RUNTIME.session_current():
                 return
             text = str(result.text or "").strip()

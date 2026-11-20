@@ -15,7 +15,7 @@ def library():
     paths += [p/'libwemac-silk.dylib' for p in roots]
     for p in paths:
         if p.is_file():return c.CDLL(str(p))
-    raise RuntimeError('本地 SILK 编码器未安装，请运行 bot/scripts/install_silk.py')
+    raise RuntimeError('本地 SILK 编码器未安装，请将 ARONA_SILK_LIBRARY 指向 libwemac-silk.dylib')
 
 def packets(data):
     if not data.startswith(HEADER):raise ValueError('Expected Tencent SILK audio')

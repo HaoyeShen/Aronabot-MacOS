@@ -53,6 +53,12 @@ def main() -> int:
     errors: list[str] = []
     root.report_callback_exception = lambda *exc: errors.append(''.join(traceback.format_exception(*exc)))
     try:
+        assert 'settings' not in app.pages
+        service.emit('diary_status', {'ok':True,'message':'回执测试'})
+        service.emit('moments_status', {'ok':True,'message':'评论回执测试'})
+        app._poll_events()
+        assert 'settings' not in app.pages and app.toast.frame is not None
+        assert not errors
         app.toast("界面提示测试", "info")  # exercises the callable ToastManager
         app.toast.hide()
         # A busy flag must be cleared when a start/stop callback returns.
@@ -76,7 +82,7 @@ def main() -> int:
         root.update_idletasks()  # Tk applies place geometry in the idle queue.
         assert set(home.tiles) == set((
             'dashboard', 'debug', 'agent', 'monitor', 'stickers', 'targets', 'listen_reply',
-            'personas', 'models', 'training', 'logs', 'settings'))
+            'personas', 'models', 'training', 'logs', 'settings', 'moments'))
         assert len(home._portrait_photos) == 2, f'both portrait frames must load: {home.canvas.winfo_width()}x{home.canvas.winfo_height()}'
         for tile in home.tiles.values():
             assert tile.winfo_x() >= 0 and tile.winfo_y() >= 0

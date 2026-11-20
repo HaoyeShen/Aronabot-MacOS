@@ -68,6 +68,21 @@ with tempfile.TemporaryDirectory() as tmp:
                 release.set(); worker.join(3)
         service._background_health['retry_after'] = time.monotonic()+600
         assert service._background_ready({**profile, 'api_key_enc':'different-key'})
+        # A large context summary gets a longer, still bounded budget than a
+        # quick share decision, so peak-hour latency does not trigger the
+        # shared ten-minute backoff.  Regression for repeated 20s timeouts.
+        for index in range(20):
+            memory.add_user('test', f'消息{index} ' + '内容'*200, sender='成员')
+        with patch('app.service.make_client') as factory:
+            factory.return_value.chat.return_value = LLMResult('摘要正文。', 'fixture', 'mock', 1)
+            service._summarize_chat('test')
+            assert factory.call_args.args[0]['timeout'] == 35
+            assert memory.get_summary('test')['summary'] == '摘要正文。'
+        service._background_health['retry_after'] = 0
+        with patch('app.service.make_client') as factory:
+            factory.return_value.chat.return_value = LLMResult('短。', 'fixture', 'mock', 1)
+            service._background_chat(profile, [], '')
+            assert factory.call_args.args[0]['timeout'] == 20
     finally:
         service.stop();memory.close();training.close()
 print('BACKGROUND MODEL TESTS PASSED')

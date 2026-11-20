@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import queue
 import sys
 import threading
 import tkinter as tk
@@ -433,9 +434,12 @@ class MainWindow:
             for _ in range(80):
                 try:
                     kind, data = self.service.events.get_nowait()
-                except Exception:
+                except queue.Empty:
                     break
-                self._dispatch(kind, data)
+                try:
+                    self._dispatch(kind, data)
+                except Exception:
+                    log.exception("处理界面事件失败 · %s", kind)
         finally:
             try:
                 self.root.after(120, self._poll_events)
@@ -470,21 +474,18 @@ class MainWindow:
                                     for item in outside[:3])
                 self.toast.show("未读消息中有未监听会话：" + summary,
                                 "warn", 8000)
+        page_key = self._current_page
         if kind in ("voice_test_done", "idle_video_manual_done", "web_search_test_done"):
-            self.pages["listen_reply"].on_event(kind, data)
-            return
-        if kind == "news_test_done":
-            self.pages["targets"].on_event(kind, data)
-            return
-        if kind in ('diary_preview_done','diary_publish_done','diary_status','moments_preview_done','moments_status','economy_check_done'):
-            self.pages['settings'].on_event(kind,data)
-            return
-        page = self.pages.get(self._current_page)
+            page_key = "listen_reply"
+        elif kind == "news_test_done":
+            page_key = "targets"
+        elif kind in ('diary_preview_done','diary_publish_done','diary_status','moments_preview_done','moments_status','economy_check_done'):
+            page_key = "settings"
+        page = self.pages.get(page_key)
         if page is not None:
-            try:
-                page.on_event(kind, data)
-            except Exception:
-                pass
+            page.on_event(kind, data)
+        elif kind in ('diary_status', 'moments_status'):
+            self.toast.show(data.get('message', ''), 'success' if data.get('ok') else 'warn')
 
     # ------------------------------------------------------------------ dialogs
     def show_diagnostics(self, result: dict) -> None:

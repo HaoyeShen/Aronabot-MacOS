@@ -56,7 +56,9 @@ def main():
    def turn(text,delivery,**metadata):
     adapter.sent.clear();msg=IncomingMessage('test','昵称',text,chat_type='group')
     row=service._store_user(msg,text)
-    result=LLMResult('这次测试成功。','fixture','openai',1)
+    # Each turn needs a distinct answer: an identical one triggers the real
+    # duplicate-reply repair call, which must not reach the network in tests.
+    result=LLMResult('这次测试成功，第%d次。'%row,'fixture','openai',1)
     outcome=(result,{'total':0},'',{'agent':{'status':'completed'},'delivery':delivery,**metadata})
     with patch.object(service,'_model_reply',return_value=outcome),patch('app.service.make_tts') as factory,patch('app.native_voice.encode_clip',return_value=root/'voice.amr'):
      factory.return_value.synthesize.return_value=AudioClip(np.zeros(4800))
@@ -86,9 +88,9 @@ def main():
     assert factory.return_value.synthesize.call_args.args[0]=='老师，你好呀！'
    assert [v[0] for v in adapter.sent]==['voice']
    adapter.sent.clear()
-   mixed=IncomingMessage('test','Alex小明','发个语音打下招呼吧',chat_type='group')
+   mixed=IncomingMessage('test','Alice小明','发个语音打下招呼吧',chat_type='group')
    row=service._store_user(mixed,mixed.content)
-   mixed_outcome=(LLMResult('Alex小明老师，\n阿洛娜在这里哦，今天也请多指教。','fixture','openai',1),{},'',
+   mixed_outcome=(LLMResult('Alice小明老师，\n阿洛娜在这里哦，今天也请多指教。','fixture','openai',1),{},'',
                   {'agent':{'status':'completed'},'delivery':{'kind':'voice'}})
    with patch.object(service,'_model_reply',return_value=mixed_outcome),patch('app.service.make_tts') as factory,patch('app.native_voice.encode_clip',return_value=root/'voice.amr'),patch('app.voice_presets.resolve_persona_voice',return_value={'engine':'gpt_sovits','id':'arona'}):
     factory.return_value.synthesize.return_value=AudioClip(np.zeros(4800))
